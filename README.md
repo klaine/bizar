@@ -6,6 +6,8 @@ It has two interacting digital engines, a modulation grid, a Cycling
 Envelope, a sequencer and arpeggiator, and three effect slots, with 128
 original factory presets.
 
+**Try it live:** [play Bizar in your browser](https://klaine.github.io/bizar/) (WebAssembly build, WebMIDI).
+
 Bizar takes its workflow from two-engine performance synths like Arturia's
 MiniFreak. It is not an Arturia product and is not affiliated with Arturia.
 It contains no Arturia code, firmware, presets or sample data. If you own a

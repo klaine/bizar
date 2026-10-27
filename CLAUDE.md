@@ -11,6 +11,7 @@ CC=cc sh scripts/build.sh --test    # desktop DSP and integration tests (tests/t
 sh scripts/build.sh                 # dsp.so ($CC, else aarch64-linux-gnu-gcc, else zig cc) + dist/ + web build
 sh scripts/build.sh --reference     # regenerate PARAMETER_REFERENCE.md and docs/PRESETS.md
 sh scripts/build.sh --web           # dist/bizar-web.html only (needs a full build once)
+sh scripts/pages.sh [--push]        # dist/bizar-web.html as index.html on the `pages` branch (the web build runs it)
 sh scripts/deploy.sh [--personal]   # staged install on a Move (MOVE_HOST, MOVE_USER)
 ```
 
@@ -32,6 +33,9 @@ The project skills `/build` and `/deploy` in `.claude/skills/` wrap these.
   `CHANGELOG.md` entry under the top "Unreleased" heading.
 - **Realtime:** no file I/O and no heap allocation in plugin callbacks. The plugin uses a fixed
   pool of 8 instances, and delay memory is cleared incrementally.
+- **`pages` branch:** written by `scripts/pages.sh`, one parentless commit of `index.html` and
+  `.nojekyll`, force-pushed with `--push`. Never commit to it by hand, and never publish a build made
+  with `MINIFREAK_BANK` (the script refuses when `bizar-web-personal.html` is newer).
 - Builds use `-Wall -Wextra -Werror` with both gcc (CI) and clang (zig). Keep both warning-free.
 
 ## Where things come from

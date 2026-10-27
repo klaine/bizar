@@ -2,6 +2,9 @@
 
 ## Unreleased: Bizar
 
+- **Web synth start modal.** The browser build now opens with a centred "Start Bizar"
+  modal, like Amino and Crest, instead of a small Start audio button in the top bar.
+  Its on-screen keyboard is the model the Amino and Crest web pages now follow.
 - **Additive removed.** The MiniFreak has no such engine: Bizar's Additive was a
   lookup into the harmonic wavetable family, and the MiniFreak's additive sound
   is Harmo. Later Osc 1/Osc 2 type indices shift down one (state version 18);

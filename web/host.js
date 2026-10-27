@@ -295,7 +295,7 @@
   }
 
   /* ---------- the bar (top bar slot when the page has one) ---------- */
-  var bar, midiStatus, startBtn, keysInfo, bpmIn, holdBtn, kbdPanel, kbdKeys = [], scopeCanvas, scopeMode = "wave", clipUntil = 0;
+  var bar, midiStatus, startBtn, gate, gateErr, keysInfo, bpmIn, holdBtn, kbdPanel, kbdKeys = [], scopeCanvas, scopeMode = "wave", clipUntil = 0;
   var CSS = [
     "#sf-host{display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center;justify-content:flex-end;font-size:11px;color:var(--dim,#aaa)}",
     "#sf-host.floating{position:fixed;right:10px;bottom:10px;z-index:40;padding:6px 10px;border-radius:10px;background:var(--card,#171915);border:1px solid var(--line2,#333)}",
@@ -308,6 +308,13 @@
     "#sf-host input[type=number]{width:54px}",
     "#sf-host canvas{display:block;width:96px;height:26px;border-radius:5px;background:var(--bg,#0e100d);border:1px solid var(--line,#262a22);cursor:pointer}",
     "#sf-host .st{max-width:260px;white-space:normal}",
+    "#sf-gate{position:fixed;inset:0;z-index:80;display:grid;place-items:center;padding:20px;background:rgba(8,9,7,.82);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}",
+    "#sf-gate .card{max-width:460px;display:flex;flex-direction:column;align-items:center;gap:12px;text-align:center;padding:34px 30px;border-radius:14px;background:var(--card,#171915);border:1px solid var(--line2,#333);box-shadow:0 30px 80px #000a;color:var(--ink,#eee)}",
+    "#sf-gate .logo{font-size:30px;font-weight:700;letter-spacing:.2em;margin-bottom:4px}",
+    "#sf-gate p{margin:0;color:var(--dim,#aaa);font-size:13px;line-height:1.5}",
+    "#sf-gate .go{margin-top:8px;padding:11px 30px;border-radius:9px;border:1px solid transparent;background:var(--lime,#d6ff38);color:#111;font:inherit;font-weight:700;letter-spacing:.08em;cursor:pointer}",
+    "#sf-gate .go:disabled{opacity:.6;cursor:default}",
+    "#sf-gate .err{min-height:1em;color:#ff9a8a}",
     "#sf-midi{position:fixed;z-index:61;width:260px;padding:12px;display:grid;gap:8px;background:var(--card,#171915);border:1px solid var(--line2,#333);border-radius:12px;box-shadow:0 20px 60px #000c;font-size:12px;color:var(--ink,#eee)}",
     "#sf-midi label{display:grid;gap:3px;color:var(--dim,#aaa);font-size:10px;letter-spacing:.08em;text-transform:uppercase}",
     "#sf-midi label.row{display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0;font-size:12px;color:var(--ink,#eee)}",
@@ -341,9 +348,19 @@
     var slot = document.getElementById("host-slot");
     if (!slot) bar.className = "floating";
 
-    startBtn = el("button", "▶ Start audio", { type: "button", class: "go" });
-    startBtn.addEventListener("click", wake);
-    midiStatus = el("span", "Click Start audio to play", { class: "st" });
+    startBtn = el("button", "Start Bizar", { type: "button", class: "go" });
+    startBtn.addEventListener("click", function () { startBtn.disabled = true; startBtn.textContent = "Starting…"; wake(); });
+    gateErr = el("p", null, { class: "err", role: "alert" });
+    gate = el("div", null, { id: "sf-gate" });
+    var card = el("div", null, { class: "card" });
+    card.appendChild(el("span", "BIZAR", { class: "logo" }));
+    card.appendChild(el("p", "A two-engine hybrid synthesizer for Ableton Move. This is the same engine, compiled to WebAssembly and running in your browser."));
+    card.appendChild(el("p", "Play it with the Keys panel, your computer keyboard (A–K) or a MIDI keyboard."));
+    card.appendChild(startBtn);
+    card.appendChild(gateErr);
+    gate.appendChild(card);
+    document.body.appendChild(gate);
+    midiStatus = el("span", "Audio not started", { class: "st" });
 
     scopeCanvas = el("canvas", null, { title: "Output: waveform and level (click for spectrum). Red = clipping." });
     scopeCanvas.addEventListener("click", function () { scopeMode = scopeMode === "wave" ? "spectrum" : "wave"; });
@@ -378,8 +395,8 @@
     keysInfo = el("span", null, { title: "Computer keyboard: A–K white keys, W E T Y U O P black keys, Z / X octave, C / V velocity" });
     showOctave();
 
-    if (startError) { setStatus(startError); startBtn.textContent = "↻ Retry audio"; }
-    var g1 = el("span", null, { class: "grp" }); g1.appendChild(startBtn); g1.appendChild(midiStatus);
+    if (startError) { setStatus(startError); gateErr.textContent = startError; startBtn.textContent = "↻ Retry audio"; }
+    var g1 = el("span", null, { class: "grp" }); g1.appendChild(midiStatus);
     var g2 = el("span", null, { class: "grp" }); g2.appendChild(scopeCanvas); g2.appendChild(vol); g2.appendChild(panicBtn);
     var g3 = el("span", null, { class: "grp" }); g3.appendChild(midiBtn); g3.appendChild(document.createTextNode("BPM")); g3.appendChild(bpmIn);
     var g4 = el("span", null, { class: "grp" }); g4.appendChild(kbdBtn); g4.appendChild(keysInfo);
@@ -392,10 +409,15 @@
   function wake() {
     return start().then(function () {
       if (ctx.state !== "running") ctx.resume();
-      if (startBtn && startBtn.isConnected) {
-        startBtn.remove(); setStatus("MIDI: not connected"); initMidi(); requestAnimationFrame(drawScope);
+      if (gate && gate.isConnected) {
+        gate.remove(); setStatus("MIDI: not connected"); initMidi(); requestAnimationFrame(drawScope);
       }
-    }, function () {});
+    }, function () {
+      if (gate && gate.isConnected) {
+        gateErr.textContent = startError;
+        startBtn.disabled = false; startBtn.textContent = "↻ Retry audio";
+      }
+    });
   }
   function setStatus(text) { if (midiStatus) midiStatus.textContent = text; }
   function setTempo(bpm) {

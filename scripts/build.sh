@@ -72,6 +72,7 @@ fi
 # arguments also builds it when zig is on PATH.
 if [ "${1:-}" = "--web" ]; then
     "$PYTHON" "$ROOT/web/build.py"
+    sh "$ROOT/scripts/pages.sh"   # dist/bizar-web.html as index.html on the local pages branch (push: scripts/pages.sh --push)
     exit 0
 fi
 
@@ -155,6 +156,7 @@ fi
 
 if command -v "$ZIG" >/dev/null 2>&1; then
     ZIG="$ZIG" "$PYTHON" "$ROOT/web/build.py"
+    sh "$ROOT/scripts/pages.sh"   # dist/bizar-web.html as index.html on the local pages branch (push: scripts/pages.sh --push)
 else
     printf 'zig not found: skipped dist/bizar-web.html (sh scripts/build.sh --web)\n'
 fi

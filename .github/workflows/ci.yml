@@ -1,0 +1,33 @@
+name: Build and test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-and-cross-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install AArch64 compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross python3
+
+      - name: Run native plugin tests
+        run: CC=gcc sh scripts/build.sh --test
+
+      - name: Verify generated docs are current
+        run: |
+          sh scripts/build.sh --reference
+          git diff --exit-code PARAMETER_REFERENCE.md docs/PRESETS.md
+
+      - name: Cross-compile module
+        run: sh scripts/build.sh
+
+      - name: Verify target binary
+        run: |
+          file dist/bizar/dsp.so
+          readelf -h dist/bizar/dsp.so | grep -E 'Machine:.*AArch64'
+          tar -tzf dist/bizar-module.tar.gz

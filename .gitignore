@@ -1,0 +1,20 @@
+# Build output
+/build/
+/dist/
+*.o
+a.out
+
+# Arturia MiniFreak material: exports, renders and anything you keep for
+# personal builds. These are not part of Bizar and must not be published.
+*.mnfx
+*.mf_export
+*.aif
+*.aiff
+/private/
+
+# Local tooling
+.claude/
+__pycache__/
+*.pyc
+.DS_Store
+*.dSYM/

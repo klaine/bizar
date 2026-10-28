@@ -117,6 +117,11 @@ typedef struct {
     int steal_channel;
     int steal_index;
     sf_voice_start_params_t steal_params;
+    /* Sustain pedal: the key was released while the pedal was down, so the
+     * voice holds until the pedal comes up. steal_sustained is the same for
+     * the note waiting on a steal fade. */
+    int sustained;
+    int steal_sustained;
     int note;
     /* See sf_voice_start_params_t.key. */
     int key;
@@ -243,6 +248,13 @@ void sf_voice_release_note(sf_voice_t voices[SF_MAX_VOICES], int note,
 void sf_voice_release_channel(sf_voice_t voices[SF_MAX_VOICES], int channel,
                              int immediate, float release_ms, float vel_time,
                              int release_curve);
+/* Sustain pedal: a key released with the pedal down marks its voices (and a
+ * note waiting on a steal fade) as sustained instead of releasing them. */
+void sf_voice_sustain_note(sf_voice_t voices[SF_MAX_VOICES], int note, int channel);
+/* Pedal up: release every sustained voice; a sustained note still waiting on
+ * its steal fade never starts. */
+void sf_voice_release_sustained(sf_voice_t voices[SF_MAX_VOICES], float release_ms,
+                                float vel_time, int release_curve);
 /* Builds a stage shape for a stage of nominal length `ms` (the Default
  * curve's time to the target) and returns the length the stage actually
  * runs for: a Percussive stage runs until its slow tail reaches -60 dB. */

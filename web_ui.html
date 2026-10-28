@@ -3943,6 +3943,7 @@
         [].forEach.call(ref.ringEls, function (ring) { ring.setAttribute("d", ""); });
       }
       function paintRing(ref) {
+        liveDirty = true;   /* the live dots sit on top of the knob position */
         if (!ref.ringEl) return;
         if (!ref.modable) {
           clearRings(ref);
@@ -4164,17 +4165,23 @@
        * preview below instead, labelled as such. */
       var LIVE_ORDER = ["cyc", "env", "lfo1", "lfo2", "vel", "whl", "kbd"];
       var BIPOLAR_SOURCES = { lfo1: 1, lfo2: 1, kbd: 1 };
-      var liveMode = "unknown", liveValues = null, lastSeqStep = -2;
+      var liveMode = "unknown", liveValues = null, lastSeqStep = -2, liveText = null;
       function startLivePoll() {
         function tick() {
           if (document.hidden) { setTimeout(tick, 400); return; }
           Promise.all([remote.getParam(component + ":mod_sources"), remote.getParam(component + ":seq_step")]).then(function (v) {
             if (v[1] === undefined || v[1] === null || String(v[1]) === "") { liveMode = "sim"; return; }
             liveMode = "real";
-            var values = null;
-            try { var list = v[0] ? JSON.parse(v[0]) : null; if (Array.isArray(list)) { values = {}; LIVE_ORDER.forEach(function (id, i) { values[id] = Number(list[i]) || 0; }); } }
-            catch (error) { values = null; }
-            liveValues = values;
+            /* Only a changed reading replaces liveValues, so the paint loop
+             * can tell nothing moved and skip the frame. */
+            var text = v[0] ? String(v[0]) : "";
+            if (text !== liveText) {
+              liveText = text;
+              var values = null;
+              try { var list = text ? JSON.parse(text) : null; if (Array.isArray(list)) { values = {}; LIVE_ORDER.forEach(function (id, i) { values[id] = Number(list[i]) || 0; }); } }
+              catch (error) { values = null; }
+              liveValues = values;
+            }
             var step = Math.round(Number(v[1]));
             if (step !== lastSeqStep) { lastSeqStep = step; if (sfxApi && sfxApi.setPlayhead) sfxApi.setPlayhead(step); }
             setTimeout(tick, remote.web ? 60 : 150);
@@ -4212,8 +4219,18 @@
       }
 
       var liveRefs = [];
+      /* What the last frame painted. A frame repaints only when the readings,
+       * the open source popup, a knob or the controls changed (or, for a module
+       * without live keys, every frame of the simulation). */
+      var liveDirty = true, livePaintedValues, livePaintedPop, livePaintedRefs, liveMeters = null;
       function liveLoop(ms) {
-        if (!document.hidden && liveRefs.length) {
+        var stale = liveMode === "sim" || liveDirty || liveValues !== livePaintedValues
+          || pop.el !== livePaintedPop || liveRefs !== livePaintedRefs;
+        if (!document.hidden && liveRefs.length && stale) {
+          liveDirty = false;
+          livePaintedValues = liveValues;
+          livePaintedPop = pop.el;
+          livePaintedRefs = liveRefs;
           var values = liveMode === "sim" ? simSources(ms / 1000) : liveValues;
           liveRefs.forEach(function (ref) {
             var ids = ref.routes ? Object.keys(ref.routes) : [];
@@ -4233,9 +4250,12 @@
           });
           paintLandscapeLive("osc1", values);
           paintLandscapeLive("osc2", values);
-          [].forEach.call(document.querySelectorAll(".chip[data-s]"), function (chip) {
-            var id = chip.dataset.s, value = values ? values[id] : 0, bipolar = BIPOLAR_SOURCES[id];
-            chip.querySelector(".meter i").style.transform = "scaleX(" + (values ? clamp01(bipolar ? (value + 1) / 2 : value) : 0) + ")";
+          if (!liveMeters || !liveMeters.length) liveMeters = [].map.call(document.querySelectorAll(".chip[data-s]"), function (chip) {
+            return { id: chip.dataset.s, bar: chip.querySelector(".meter i") };
+          });
+          liveMeters.forEach(function (meter) {
+            var id = meter.id, value = values ? values[id] : 0, bipolar = BIPOLAR_SOURCES[id];
+            meter.bar.style.transform = "scaleX(" + (values ? clamp01(bipolar ? (value + 1) / 2 : value) : 0) + ")";
           });
           if (pop.el) [].forEach.call(pop.el.querySelectorAll(".prow"), function (line) {
             var id = line.dataset.s, value = values ? values[id] : 0, bipolar = BIPOLAR_SOURCES[id], live = line.querySelector(".plive");

@@ -24,6 +24,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef SF_PROFILE
+#include <time.h>
+#endif
 
 #define SF_INSTANCE_POOL 8
 /* Keyboard Chord notes added to each key: the rest of the six voices. */
@@ -101,6 +104,22 @@ typedef struct {
     sf_engine_voice_t osc1;
     sf_engine_voice_t osc2;
 } sf_voice_ctl_t;
+
+/* A one-pass index of a JSON object's top-level keys, so a state load looks
+ * each of its few hundred keys up in a hash table instead of rescanning the
+ * whole blob with strstr for every one (that was 0.6 ms a load on a desktop,
+ * several times that on Move). Lives in the instance: no allocation and no
+ * large stack frame on the audio thread. */
+#define SF_JSON_KEYS 768
+#define SF_JSON_SLOTS 2048
+typedef struct {
+    const char *text;          /* the string indexed, NULL when none */
+    int count;
+    uint32_t key_off[SF_JSON_KEYS];
+    uint32_t val_off[SF_JSON_KEYS];
+    uint16_t key_len[SF_JSON_KEYS];
+    uint16_t slot[SF_JSON_SLOTS]; /* entry + 1, 0 empty */
+} sf_json_index_t;
 
 typedef struct {
     int pool_index;
@@ -258,15 +277,26 @@ typedef struct {
     uint8_t held_chan[16];
     int held_count;
     int held_mode;
+    /* Sustain pedal (CC 64), and the keys released while it was down in Seq
+     * or Arp mode, which stay held in the sequencer until it comes up. */
+    int sustain_down;
+    uint32_t seq_sustained[4];
     sf_voice_t voices[SF_MAX_VOICES];
     sf_voice_ctl_t voice_ctl[SF_MAX_VOICES];
     /* Shared-LFO wraps so far, so a voice that only looks at the LFO once
      * per control tick still draws a new Sample & Hold value for each. */
     unsigned lfo1_wraps;
     unsigned lfo2_wraps;
+    sf_json_index_t json_ix;
+#ifdef SF_PROFILE
+    float cpu_us; /* smoothed render time, profile builds only (cpu_us key) */
+#endif
 } sf_instance_t;
 
 static sf_instance_t g_instances[SF_INSTANCE_POOL];
+/* The host's API, for tempo and transport. NULL in the browser build and the
+ * tests, where Move's set info (move_info.h) is the tempo source. */
+static const host_api_v1_t *g_host;
 /* Static storage: every flag starts at 0 (free). */
 static atomic_uint g_instance_claimed[SF_INSTANCE_POOL];
 
@@ -1866,7 +1896,9 @@ static void start_note(sf_instance_t *inst, int note, int velocity, int channel)
     start_note_voices(inst, note, velocity, channel, 0);
 }
 
-static void release_note(sf_instance_t *inst, int note, int channel) {
+/* A note-off. A key (from MIDI) honours the sustain pedal; a note the
+ * sequencer ends does not, so a held pedal never stretches its gate. */
+static void release_note_ex(sf_instance_t *inst, int note, int channel, int key) {
     if (held_stack_mode(inst)) {
         held_sync_mode(inst);
         held_remove(inst, note, channel);
@@ -1880,8 +1912,15 @@ static void release_note(sf_instance_t *inst, int note, int channel) {
             return;
         }
     }
-    sf_voice_release_note(inst->voices, note, channel, inst->release_ms,
-                          inst->vel_time, inst->release_curve);
+    if (key && inst->sustain_down)
+        sf_voice_sustain_note(inst->voices, note, channel);
+    else
+        sf_voice_release_note(inst->voices, note, channel, inst->release_ms,
+                              inst->vel_time, inst->release_curve);
+}
+
+static void release_note(sf_instance_t *inst, int note, int channel) {
+    release_note_ex(inst, note, channel, 0);
 }
 
 static void release_channel(sf_instance_t *inst, int channel, int immediate) {
@@ -1896,8 +1935,24 @@ static void release_channel(sf_instance_t *inst, int channel, int immediate) {
 static void seq_flush(sf_instance_t *inst) {
     sf_seq_event_t events[SF_SEQ_EVENTS];
     int count = sf_seq_panic(&inst->seq, events, SF_SEQ_EVENTS);
+    memset(inst->seq_sustained, 0, sizeof(inst->seq_sustained));
     for (int i = 0; i < count; ++i) release_note(inst, events[i].note, 0);
     release_channel(inst, -1, 0);
+}
+
+static void sustain_pedal(sf_instance_t *inst, int down) {
+    down = down ? 1 : 0;
+    if (down == inst->sustain_down) return;
+    inst->sustain_down = down;
+    if (down) return;
+    for (int word = 0; word < 4; ++word) {
+        uint32_t bits = inst->seq_sustained[word];
+        inst->seq_sustained[word] = 0;
+        for (int bit = 0; bits; ++bit, bits >>= 1)
+            if (bits & 1u) sf_seq_key_up(&inst->seq, word * 32 + bit);
+    }
+    sf_voice_release_sustained(inst->voices, inst->release_ms, inst->vel_time,
+                               inst->release_curve);
 }
 
 static void seq_set_mode(sf_instance_t *inst, int mode) {
@@ -2170,39 +2225,100 @@ static void set_numeric_param(sf_instance_t *inst, const char *key, float value)
 
 /* Copies the quoted string value of `key` (no escapes - the only string the
  * state carries is the sequencer pattern, which is digits and . + , only). */
-static int json_string(const char *json, const char *key, char *out, size_t cap) {
+static uint32_t json_hash(const char *key, size_t len) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < len; ++i) h = (h ^ (unsigned char)key[i]) * 16777619u;
+    return h;
+}
+
+/* Index json's top-level "key": value pairs. The first of a repeated key
+ * wins, as the scan below finds it first. */
+static void json_index_build(sf_json_index_t *ix, const char *json) {
+    ix->text = json;
+    ix->count = 0;
+    memset(ix->slot, 0, sizeof(ix->slot));
+    const char *p = json;
+    while (*p && *p != '{') ++p;
+    if (*p) ++p;
+    while (*p && ix->count < SF_JSON_KEYS) {
+        while (*p && *p != '"' && *p != '}') ++p;
+        if (*p != '"') break;
+        const char *key = ++p;
+        while (*p && *p != '"') ++p;
+        if (!*p) break;
+        size_t len = (size_t)(p - key);
+        ++p;
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+        if (*p != ':') continue;
+        ++p;
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+        const char *val = p;
+        if (*p == '"') {
+            ++p;
+            while (*p && *p != '"') p += (*p == '\\' && p[1]) ? 2 : 1;
+            if (*p) ++p;
+        } else {
+            while (*p && *p != ',' && *p != '}') ++p;
+        }
+        if (len >= 65535) continue;
+        uint32_t mask = SF_JSON_SLOTS - 1, h = json_hash(key, len) & mask;
+        int dup = 0;
+        while (ix->slot[h]) {
+            int e = ix->slot[h] - 1;
+            if (ix->key_len[e] == len && memcmp(json + ix->key_off[e], key, len) == 0) { dup = 1; break; }
+            h = (h + 1) & mask;
+        }
+        if (dup) continue;
+        int e = ix->count++;
+        ix->key_off[e] = (uint32_t)(key - json);
+        ix->key_len[e] = (uint16_t)len;
+        ix->val_off[e] = (uint32_t)(val - json);
+        ix->slot[h] = (uint16_t)(e + 1);
+    }
+}
+
+/* The value of key in json, or NULL: from the instance's index when it holds
+ * this very string, otherwise by scanning. */
+static const char *json_value(const sf_instance_t *inst, const char *json, const char *key) {
     size_t key_len = strlen(key);
+    if (inst && inst->json_ix.text == json) {
+        const sf_json_index_t *ix = &inst->json_ix;
+        uint32_t mask = SF_JSON_SLOTS - 1, h = json_hash(key, key_len) & mask;
+        while (ix->slot[h]) {
+            int e = ix->slot[h] - 1;
+            if (ix->key_len[e] == key_len && memcmp(json + ix->key_off[e], key, key_len) == 0)
+                return json + ix->val_off[e];
+            h = (h + 1) & mask;
+        }
+        return NULL;
+    }
     const char *p = json;
     do {
         p = strstr(p, key);
-        if (!p) return 0;
+        if (!p) return NULL;
         if (p > json && p[-1] == '"' && p[key_len] == '"') break;
         ++p;
     } while (*p);
     p += key_len + 1;
     while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
-    if (*p++ != ':') return 0;
+    if (*p++ != ':') return NULL;
     while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
-    if (*p++ != '"') return 0;
+    return p;
+}
+
+static int json_string(const sf_instance_t *inst, const char *json, const char *key,
+                       char *out, size_t cap) {
+    const char *p = json_value(inst, json, key);
+    if (!p || *p++ != '"') return 0;
     size_t n = 0;
     while (*p && *p != '"' && n + 1 < cap) out[n++] = *p++;
     out[n] = '\0';
     return 1;
 }
 
-static int json_number(const char *json, const char *key, float *out) {
-    size_t key_len = strlen(key);
-    const char *p = json;
-    do {
-        p = strstr(p, key);
-        if (!p) return 0;
-        if (p > json && p[-1] == '"' && p[key_len] == '"') break;
-        ++p;
-    } while (*p);
-    p += key_len + 1;
-    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
-    if (*p++ != ':') return 0;
-    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+static int json_number(const sf_instance_t *inst, const char *json, const char *key, float *out) {
+    const char *p = json_value(inst, json, key);
+    if (!p) return 0;
     char *end = NULL;
     float value = strtof(p, &end);
     if (end == p || !isfinite(value)) return 0;
@@ -2213,11 +2329,11 @@ static int json_number(const char *json, const char *key, float *out) {
 static void migrate_legacy_engine_mix(sf_instance_t *inst, const char *json) {
     float legacy_mix;
     float ignored;
-    if (!json_number(json, "mix", &legacy_mix)) return;
-    if (json_number(json, "osc1_wave", &ignored)
-        || json_number(json, "osc1_timbre", &ignored)
-        || json_number(json, "osc2_wave", &ignored)
-        || json_number(json, "osc2_timbre", &ignored)) return;
+    if (!json_number(inst, json, "mix", &legacy_mix)) return;
+    if (json_number(inst, json, "osc1_wave", &ignored)
+        || json_number(inst, json, "osc1_timbre", &ignored)
+        || json_number(inst, json, "osc2_wave", &ignored)
+        || json_number(inst, json, "osc2_timbre", &ignored)) return;
     legacy_mix = sf_clampf(legacy_mix, 0.0f, 1.0f);
     inst->osc1_level *= 1.0f - legacy_mix;
     inst->osc2_level *= legacy_mix;
@@ -2245,6 +2361,8 @@ static void initialize_instance(sf_instance_t *inst, int pool_index,
     inst->contract_dirty_blocks = 0;
     inst->contract_was_dirty = 0;
     inst->age_counter = 0;
+    inst->sustain_down = 0;
+    memset(inst->seq_sustained, 0, sizeof(inst->seq_sustained));
 
     for (int channel = 0; channel < 16; ++channel) {
         inst->bend_ratio[channel] = 1.0f;
@@ -2259,8 +2377,10 @@ static void initialize_instance(sf_instance_t *inst, int pool_index,
     inst->lfo1_wraps = 0u;
     inst->lfo2_wraps = 0u;
 
+    inst->json_ix.text = NULL;
     if (json_defaults && *json_defaults) {
-#define READ_DEFAULT(name) do { float v; if (json_number(json_defaults, #name, &v)) set_numeric_param(inst, #name, v); } while (0)
+        json_index_build(&inst->json_ix, json_defaults);
+#define READ_DEFAULT(name) do { float v; if (json_number(inst, json_defaults, #name, &v)) set_numeric_param(inst, #name, v); } while (0)
         READ_DEFAULT(osc1_mode); READ_DEFAULT(osc1_table); READ_DEFAULT(osc1_position);
         READ_DEFAULT(osc1_wave); READ_DEFAULT(osc1_timbre); READ_DEFAULT(osc1_shape);
         READ_DEFAULT(osc1_tune); READ_DEFAULT(osc1_quantize); READ_DEFAULT(osc1_level);
@@ -2307,6 +2427,7 @@ static void initialize_instance(sf_instance_t *inst, int pool_index,
         READ_DEFAULT(lfo2_point5); READ_DEFAULT(lfo2_point6); READ_DEFAULT(lfo2_point7); READ_DEFAULT(lfo2_point8);
 #undef READ_DEFAULT
         migrate_legacy_engine_mix(inst, json_defaults);
+        inst->json_ix.text = NULL;
     }
     sf_effect_state_init(&inst->fx_state, inst->fx_mix, inst->fx_eq_db,
                          inst->fx_peak_frequency, inst->fx_peak_gain, inst->fx_peak_width);
@@ -2475,11 +2596,17 @@ static void sf_on_midi(void *instance, const uint8_t *msg, int len, int source) 
     int data2 = len >= 3 ? (msg[2] & 0x7f) : 0;
 
     if (status == 0x90u && data2 > 0) {
-        if (inst->seq.mode != SEQ_MODE_OFF) sf_seq_key_down(&inst->seq, data1, data2);
+        if (inst->seq.mode != SEQ_MODE_OFF) {
+            inst->seq_sustained[data1 >> 5] &= ~(1u << (data1 & 31));
+            sf_seq_key_down(&inst->seq, data1, data2);
+        }
         else start_note(inst, data1, data2, channel);
     } else if (status == 0x80u || (status == 0x90u && data2 == 0)) {
-        if (inst->seq.mode != SEQ_MODE_OFF) sf_seq_key_up(&inst->seq, data1);
-        else release_note(inst, data1, channel);
+        if (inst->seq.mode != SEQ_MODE_OFF) {
+            if (inst->sustain_down) inst->seq_sustained[data1 >> 5] |= 1u << (data1 & 31);
+            else sf_seq_key_up(&inst->seq, data1);
+        }
+        else release_note_ex(inst, data1, channel, 1);
     } else if (status == 0xa0u) {
         for (int i = 0; i < SF_MAX_VOICES; ++i) {
             sf_voice_t *voice = &inst->voices[i];
@@ -2499,6 +2626,19 @@ static void sf_on_midi(void *instance, const uint8_t *msg, int len, int source) 
     } else if (status == 0xb0u && data1 == 1) {
         /* Mod wheel, which is the grid's "Wheel" source row. */
         inst->wheel = (float)data2 / 127.0f;
+    } else if (status == 0xb0u && data1 == 64) {
+        sustain_pedal(inst, data2 >= 64);
+    } else if (status == 0xb0u && data1 == 121) {
+        /* Reset All Controllers: wheel, this channel's bend and pressure,
+         * and the pedal, which lets go of what it was holding. */
+        inst->wheel = 0.0f;
+        inst->bend_raw[channel] = 0.0f;
+        inst->bend_ratio[channel] = 1.0f;
+        inst->channel_pressure[channel] = 0.0f;
+        for (int i = 0; i < SF_MAX_VOICES; ++i)
+            if (inst->voices[i].active && inst->voices[i].channel == channel)
+                inst->voices[i].pressure = 0.0f;
+        sustain_pedal(inst, 0);
     } else if (status == 0xb0u && data1 == 123) {
         if (inst->seq.mode != SEQ_MODE_OFF) seq_flush(inst);
         release_channel(inst, channel, 0);
@@ -2611,16 +2751,16 @@ static void read_grid(sf_instance_t *inst, const char *json) {
             const char *suffix = field == 0 ? "dest" : g_mod_slot_suffix[field - 1];
             snprintf(key, sizeof(key), "modcol%d_%s", column + 1, suffix);
             float value;
-            if (json_number(json, key, &value)) set_numeric_param(inst, key, value);
+            if (json_number(inst, json, key, &value)) set_numeric_param(inst, key, value);
         }
     }
     for (int macro = 0; macro < SF_MACROS; ++macro) {
         for (int slot = 0; slot < SF_MACRO_SLOTS; ++slot) {
             snprintf(key, sizeof(key), "macro%d_dest%d", macro + 1, slot + 1);
             float value;
-            if (json_number(json, key, &value)) set_numeric_param(inst, key, value);
+            if (json_number(inst, json, key, &value)) set_numeric_param(inst, key, value);
             snprintf(key, sizeof(key), "macro%d_amt%d", macro + 1, slot + 1);
-            if (json_number(json, key, &value)) set_numeric_param(inst, key, value);
+            if (json_number(inst, json, key, &value)) set_numeric_param(inst, key, value);
         }
     }
     {
@@ -2631,11 +2771,11 @@ static void read_grid(sf_instance_t *inst, const char *json) {
         float value;
         char data[SF_SEQ_DATA_MAX];
         for (size_t i = 0; i < sizeof(seq_keys) / sizeof(seq_keys[0]); ++i)
-            if (json_number(json, seq_keys[i], &value)) set_numeric_param(inst, seq_keys[i], value);
-        if (json_string(json, "seq_data", data, sizeof(data))) sf_seq_set_data(&inst->seq, data);
+            if (json_number(inst, json, seq_keys[i], &value)) set_numeric_param(inst, seq_keys[i], value);
+        if (json_string(inst, json, "seq_data", data, sizeof(data))) sf_seq_set_data(&inst->seq, data);
         /* A saved sequencer section lists every lane in use, so lanes it does
          * not mention are off. */
-        if (json_number(json, "seq_mode", &value)) {
+        if (json_number(inst, json, "seq_mode", &value)) {
             for (int lane = 0; lane < SF_SEQ_LANES; ++lane) {
                 inst->seq.lane_dest[lane] = 0;
                 inst->seq.lane_smooth[lane] = 1;
@@ -2644,23 +2784,23 @@ static void read_grid(sf_instance_t *inst, const char *json) {
         }
         for (int lane = 1; lane <= SF_SEQ_LANES; ++lane) {
             snprintf(key, sizeof(key), "seq_lane%d_dest", lane);
-            if (json_number(json, key, &value)) set_numeric_param(inst, key, value);
+            if (json_number(inst, json, key, &value)) set_numeric_param(inst, key, value);
             snprintf(key, sizeof(key), "seq_lane%d_smooth", lane);
-            if (json_number(json, key, &value)) set_numeric_param(inst, key, value);
+            if (json_number(inst, json, key, &value)) set_numeric_param(inst, key, value);
             snprintf(key, sizeof(key), "seq_lane%d_data", lane);
-            if (json_string(json, key, data, sizeof(data))) sf_seq_set_lane_data(&inst->seq, lane - 1, data);
+            if (json_string(inst, json, key, data, sizeof(data))) sf_seq_set_lane_data(&inst->seq, lane - 1, data);
         }
     }
     for (int lfo = 1; lfo <= 2; ++lfo) {
         float value;
         snprintf(key, sizeof(key), "lfo%d_shp_steps", lfo);
-        if (json_number(json, key, &value)) set_numeric_param(inst, key, value);
+        if (json_number(inst, json, key, &value)) set_numeric_param(inst, key, value);
         snprintf(key, sizeof(key), "lfo%d_shp_mode", lfo);
-        if (json_number(json, key, &value)) set_numeric_param(inst, key, value);
+        if (json_number(inst, json, key, &value)) set_numeric_param(inst, key, value);
         for (int field = 0; field < 4; ++field) {
             for (int step = 1; step <= SF_SHAPER_STEPS; ++step) {
                 snprintf(key, sizeof(key), "lfo%d_shp_%s%d", lfo, g_shaper_fields[field], step);
-                if (json_number(json, key, &value)) set_numeric_param(inst, key, value);
+                if (json_number(inst, json, key, &value)) set_numeric_param(inst, key, value);
             }
         }
     }
@@ -2682,7 +2822,7 @@ static void repair_imported_cycle_source(sf_instance_t *inst, const char *json,
                                          int preset_index) {
     float direct;
     if (preset_index < SF_ORIGINAL_PRESET_COUNT
-        || json_number(json, "cycle_filter_direct", &direct)
+        || json_number(inst, json, "cycle_filter_direct", &direct)
         || !has_cycle_matrix_route(inst))
         return;
     inst->cycle_amount = 1.0f;
@@ -2703,11 +2843,11 @@ static void migrate_route_grid(sf_instance_t *inst, const char *json) {
         char key[24];
         float source, destination, amount;
         snprintf(key, sizeof(key), "mod%d_source", route + 1);
-        if (!json_number(json, key, &source)) continue;
+        if (!json_number(inst, json, key, &source)) continue;
         snprintf(key, sizeof(key), "mod%d_destination", route + 1);
-        if (!json_number(json, key, &destination)) continue;
+        if (!json_number(inst, json, key, &destination)) continue;
         snprintf(key, sizeof(key), "mod%d_amount", route + 1);
-        if (!json_number(json, key, &amount)) amount = 0.0f;
+        if (!json_number(inst, json, key, &amount)) amount = 0.0f;
         int source_index = (int)clamp_enum(source, 13);
         int dest = (int)clamp_enum(destination, DEST_COUNT);
         if (source_index <= 0 || dest == DEST_OFF || amount == 0.0f) continue;
@@ -2736,20 +2876,21 @@ static void migrate_route_grid(sf_instance_t *inst, const char *json) {
 }
 
 static void apply_state_json(sf_instance_t *inst, const char *json) {
-#define RESTORE(name) do { float v; if (json_number(json, #name, &v)) set_numeric_param(inst, #name, v); } while (0)
+    json_index_build(&inst->json_ix, json);
+#define RESTORE(name) do { float v; if (json_number(inst, json, #name, &v)) set_numeric_param(inst, #name, v); } while (0)
     float state_version = 0.0f;
-    if (!json_number(json, "version", &state_version)) state_version = 0.0f;
+    if (!json_number(inst, json, "version", &state_version)) state_version = 0.0f;
     {
         /* Version 18 dropped the wavetable-based Additive mode (Osc 1 index 5,
          * Osc 2 index 6); Harmo is the real additive oscillator and takes
          * its place, and every later mode moves down one slot. */
         float mode;
-        if (json_number(json, "osc1_mode", &mode)) {
+        if (json_number(inst, json, "osc1_mode", &mode)) {
             if (state_version > 0.0f && state_version < 18.0f && mode >= 5.0f)
                 mode = mode == 5.0f ? (float)OSC_HARMO : mode - 1.0f;
             set_numeric_param(inst, "osc1_mode", mode);
         }
-        if (json_number(json, "osc2_mode", &mode)) {
+        if (json_number(inst, json, "osc2_mode", &mode)) {
             if (state_version > 0.0f && state_version < 18.0f && mode >= 6.0f)
                 mode = mode == 6.0f ? 7.0f : mode - 1.0f;   /* Harmo is 7 here */
             /* Version 19 dropped Cross FM (index 2); FM / RM is its MiniFreak
@@ -2766,7 +2907,7 @@ static void apply_state_json(sf_instance_t *inst, const char *json) {
     if (state_version > 0.0f && state_version < 11.0f
         && inst->osc1_mode == OSC_WAVETABLE) {
         float legacy_family;
-        if (json_number(json, "osc1_wave", &legacy_family)) {
+        if (json_number(inst, json, "osc1_wave", &legacy_family)) {
             inst->osc1_table = (int)sf_clampf(roundf(legacy_family
                 * (SF_WT_FAMILY_COUNT - 1)), 0.0f, (float)(SF_WT_FAMILY_COUNT - 1));
             inst->osc1_wave = inst->osc1_timbre;
@@ -2778,7 +2919,7 @@ static void apply_state_json(sf_instance_t *inst, const char *json) {
         /* Before version 17 Oscillator 2's Wavetable type used Wave as a bank
          * crossfade (over the then 16 banks) and Timbre as the position. */
         float legacy_bank;
-        if (json_number(json, "osc2_wave", &legacy_bank)) {
+        if (json_number(inst, json, "osc2_wave", &legacy_bank)) {
             inst->osc2_table = (int)sf_clampf(roundf(legacy_bank * 15.0f), 0.0f, 15.0f);
             inst->osc2_wave = inst->osc2_timbre;
             inst->osc2_timbre = 0.0f;
@@ -2792,7 +2933,7 @@ static void apply_state_json(sf_instance_t *inst, const char *json) {
          * converts an old patch exactly, rather than by the magnitude heuristic
          * a bare set_param write has to use. */
         float v;
-        if (json_number(json, "cutoff", &v)) {
+        if (json_number(inst, json, "cutoff", &v)) {
             float cutoff_value;
             if (state_version < 6.0f)          cutoff_value = cutoff_param_from_hz(v);
             else if (state_version < 9.0f)     cutoff_value = v / 100.0f;
@@ -2817,7 +2958,7 @@ static void apply_state_json(sf_instance_t *inst, const char *json) {
     RESTORE(cycle_mode); RESTORE(cycle_rise); RESTORE(cycle_fall);
     {
         float hold;
-        if (json_number(json, "cycle_hold", &hold)) {
+        if (json_number(inst, json, "cycle_hold", &hold)) {
             /* Before v11 the Env-mode Hold knob was incorrectly serialized as
              * milliseconds. Migrate its old pot position to the new Sustain. */
             if (state_version < 11.0f && inst->cycle_mode == CYCLE_ENV)
@@ -2880,9 +3021,9 @@ static void apply_state_json(sf_instance_t *inst, const char *json) {
         if (inst->cycle_mode == CYCLE_RUN) inst->cycle_mode = CYCLE_LOOP;
         else if (inst->cycle_mode == CYCLE_LOOP) inst->cycle_mode = CYCLE_RUN;
         float div;
-        if (json_number(json, "lfo1_div", &div))
+        if (json_number(inst, json, "lfo1_div", &div))
             inst->lfo1_div = g_lfo_div_v12[(int)clamp_enum(div, 20)];
-        if (json_number(json, "lfo2_div", &div))
+        if (json_number(inst, json, "lfo2_div", &div))
             inst->lfo2_div = g_lfo_div_v12[(int)clamp_enum(div, 20)];
     }
     read_grid(inst, json);
@@ -2920,9 +3061,10 @@ static void apply_state_json(sf_instance_t *inst, const char *json) {
 #undef RESTORE
     migrate_legacy_engine_mix(inst, json);
     float preset;
-    if (json_number(json, "preset", &preset))
+    if (json_number(inst, json, "preset", &preset))
         inst->preset_index = preset < 0.0f ? -1 : (int)clamp_enum(preset, SF_FACTORY_PRESET_COUNT);
     repair_imported_cycle_source(inst, json, inst->preset_index);
+    inst->json_ix.text = NULL;   /* the caller's string may be gone after this */
 }
 
 /* Switching presets swaps every parameter at once. Voices left sounding
@@ -3093,6 +3235,9 @@ static int sf_get_param(void *instance, const char *key, char *buf, int buf_len)
                  ? (int)((inst->seq.tick - 1u) % (unsigned)length) : -1;
         return snprintf(buf, (size_t)buf_len, "%d", step);
     }
+#ifdef SF_PROFILE
+    if (strcmp(key, "cpu_us") == 0) return snprintf(buf, (size_t)buf_len, "%.1f", (double)inst->cpu_us);
+#endif
     if (strcmp(key, "polyphony") == 0) {
         int active = 0;
         for (int i = 0; i < SF_MAX_VOICES; ++i) active += inst->voices[i].active;
@@ -3461,10 +3606,14 @@ static void sf_render_block(void *instance, int16_t *out, int frames) {
         for (int i = 0; i < frames * 2; ++i) out[i] = 0;
         return;
     }
+#ifdef SF_PROFILE
+    struct timespec prof_t0, prof_t1;
+    clock_gettime(CLOCK_MONOTONIC, &prof_t0);
+#endif
     uint64_t saved_fpcr = sf_enable_ftz();
 
     if (inst->contract_dirty_blocks > 0) --inst->contract_dirty_blocks;
-    sf_effect_clear_buffers(&inst->fx_state);
+    sf_effect_clear_buffers(&inst->fx_state, inst->fx_type);
     /* The FX reset clears megabytes of delay line: once per block at most. */
     int fx_reset_done = 0;
 
@@ -3539,7 +3688,17 @@ static void sf_render_block(void *instance, int16_t *out, int frames) {
      * the maths finite.
      */
     float tempo = SF_DEFAULT_TEMPO;
-    {
+    /* The host's tempo (MIDI clock, then the set) when it publishes one, and
+     * its beat position while the transport runs, so synced LFOs stay on the
+     * beat as Amino's and Crest's do. */
+    double beat = -1.0;
+    if (g_host && g_host->get_bpm) {
+        float b = g_host->get_bpm();
+        if (b > 20.0f && b < 400.0f) tempo = b;
+        if (g_host->get_clock_status && g_host->get_beat_position
+            && g_host->get_clock_status() == MOVE_CLOCK_STATUS_RUNNING)
+            beat = g_host->get_beat_position();
+    } else {
         move_info_t mi;
         if (move_info_read(&mi) && mi.valid && mi.tempo > 0.0f) tempo = mi.tempo;
     }
@@ -3557,6 +3716,25 @@ static void sf_render_block(void *instance, int16_t *out, int frames) {
                         && inst->lfo2_shaper.steps > 1) ? (float)inst->lfo2_shaper.steps : 1.0f;
     float lfo1_inc = sf_clampf(lfo1_hz, 0.01f, SF_LFO_MAX_HZ) / (SF_SAMPLE_RATE * lfo1_steps);
     float lfo2_inc = sf_clampf(lfo2_hz, 0.01f, SF_LFO_MAX_HZ) / (SF_SAMPLE_RATE * lfo2_steps);
+    /* A synced free-running LFO follows the transport: the same beat always
+     * gives the same phase. The block then runs on from there at its rate. */
+    if (beat >= 0.0) {
+        for (int n = 0; n < 2; ++n) {
+            int sync = n ? inst->lfo2_sync : inst->lfo1_sync;
+            int retrig = n ? inst->lfo2_retrig : inst->lfo1_retrig;
+            if (!sync || retrig != LFO_RETRIG_FREE) continue;
+            int div = n ? inst->lfo2_div : inst->lfo1_div;
+            double cycle = (double)g_lfo_divs[clamp_enum((float)div, SF_LFO_DIV_COUNT)].beats
+                         * (double)(n ? lfo2_steps : lfo1_steps);
+            double cyc = beat / cycle;
+            float target = (float)(cyc - floor(cyc));
+            float *phase = n ? &inst->lfo2_phase_global : &inst->lfo1_phase_global;
+            if (target < *phase - 0.5f) {   /* crossed a cycle start: a new S&H draw */
+                if (n) ++inst->lfo2_wraps; else ++inst->lfo1_wraps;
+            }
+            *phase = target;
+        }
+    }
     float attack_steps[SF_MAX_VOICES];
     float decay_steps[SF_MAX_VOICES];
     sf_env_shape_t attack_shapes[SF_MAX_VOICES];
@@ -4152,6 +4330,11 @@ static void sf_render_block(void *instance, int16_t *out, int frames) {
         out[frame * 2 + 1] = (int16_t)lrintf(right * 32767.0f);
     }
     sf_restore_fpcr(saved_fpcr);
+#ifdef SF_PROFILE
+    clock_gettime(CLOCK_MONOTONIC, &prof_t1);
+    inst->cpu_us += 0.05f * ((float)(prof_t1.tv_sec - prof_t0.tv_sec) * 1e6f
+                             + (float)(prof_t1.tv_nsec - prof_t0.tv_nsec) * 1e-3f - inst->cpu_us);
+#endif
 }
 
 static plugin_api_v2_t g_plugin_api = {
@@ -4166,6 +4349,6 @@ static plugin_api_v2_t g_plugin_api = {
 };
 
 plugin_api_v2_t *move_plugin_init_v2(const host_api_v1_t *host) {
-    (void)host;
+    g_host = host;
     return &g_plugin_api;
 }

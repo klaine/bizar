@@ -46,6 +46,32 @@ static float table_unlerp(const float *xs, const float *ys, int n, float y) {
     return xs[n - 1];
 }
 
+/* sin(2 pi phase) for any phase, without a libm call: folded onto a quarter
+ * cycle, the 9th-order series is within 4e-6 of sinf (engines.c uses the
+ * same). The modulated delays and the reverb call this every sample. */
+static float fx_sin_cycle(float phase) {
+    float x = phase - floorf(phase);
+    if (x >= 0.5f) x -= 1.0f;
+    if (x > 0.25f) x = 0.5f - x;
+    else if (x < -0.25f) x = -0.5f - x;
+    float t = SF_TWO_PI * x;
+    float t2 = t * t;
+    return t * (1.0f + t2 * (-1.6666667e-1f + t2 * (8.3333333e-3f
+             + t2 * (-1.9841270e-4f + t2 * 2.7557319e-6f))));
+}
+
+/* tan(x) for 0 <= x <= 0.6 (the phaser's corner, up to 8 kHz): the [5/4] Pade
+ * form is within 1e-7 of tanf there, with one divide. */
+static float fx_tan_small(float x) {
+    float x2 = x * x;
+    return x * (945.0f - x2 * (105.0f - x2)) / (945.0f - x2 * (420.0f - 15.0f * x2));
+}
+
+/* An effect rate from its Time knob, cached per slot: the knob curves cost a
+ * powf, and Time only moves with a knob or a route. */
+enum { RATE_CHORUS, RATE_FLANGER, RATE_PHASER };
+static float knob_rate(sf_effect_state_t *state, int slot, int table, float time_knob);
+
 /* ---- Modulation routes ------------------------------------------------------
  *
  * Measured on MiniFreak V, a route into an effect's Time, Intensity or Amount
@@ -430,6 +456,8 @@ static void reverb_update(sf_effect_state_t *state, int slot, float time_knob,
         }
         state->rev_gain[slot][c] = g;
         state->rev_damp[slot][c] = b;
+        state->rev_len[slot][c][0] = reverb_line_len(c, p->line_scale, 0);
+        state->rev_len[slot][c][1] = reverb_line_len(c, p->line_scale, 1);
     }
     /* The MiniFreak's wet grows only about 1.5 dB per doubling of the decay,
      * half what a fixed-gain network gives, so the level leans against the
@@ -522,6 +550,9 @@ void sf_effect_state_init(sf_effect_state_t *state,
         state->unison_tone_key[slot] = 2.0f; /* the tone itself spans -1..1 */
         state->comp_split_ready[slot] = 0u;
         state->delay_bq_ready[slot] = 0u;
+        state->rate_key_table[slot] = -1;
+        state->crush_key_time[slot] = -1.0f;
+        state->crush_key_int[slot] = -1.0f;
         state->phaser_hold[slot] = 0.5f;
         state->phaser_step[slot] = -1;
         state->phaser_rng[slot] = 0x9E3779B9u * (unsigned)(slot + 1);
@@ -572,10 +603,21 @@ void sf_effect_state_smooth(sf_effect_state_t *state,
     }
 }
 
-void sf_effect_clear_buffers(sf_effect_state_t *state) {
+/* The effects that read back through the slot's delay ring: they stay dry
+ * until it is clear. The rest never read it (Reverb clears its own region). */
+static int reads_delay_ring(int type) {
+    return type == FX_DELAY || type == FX_CHORUS || type == FX_FLANGER
+        || type == FX_SUPER_UNISON;
+}
+
+void sf_effect_clear_buffers(sf_effect_state_t *state, const int type[SF_FX_SLOTS]) {
     for (int slot = 0; slot < SF_FX_SLOTS; ++slot) {
         unsigned begin = state->clear_pos[slot];
-        unsigned end = begin + SF_FX_CLEAR_CHUNK;
+        /* A slot that waits on the clear gets the bigger chunk: a Delay is
+         * back 64 ms after a preset change instead of 190 ms. */
+        unsigned chunk = type && reads_delay_ring(type[slot]) ? SF_FX_CLEAR_CHUNK_WAITING
+                                                              : SF_FX_CLEAR_CHUNK;
+        unsigned end = begin + chunk;
         if (end > (unsigned)SF_DELAY_SIZE) end = (unsigned)SF_DELAY_SIZE;
         for (unsigned i = begin; i < end; ++i) {
             state->delay_l[slot][i] = 0.0f;
@@ -586,9 +628,10 @@ void sf_effect_clear_buffers(sf_effect_state_t *state) {
 }
 
 void sf_effect_reset_nonfinite(sf_effect_state_t *state) {
-    memset(state->delay_l, 0, sizeof(state->delay_l));
-    memset(state->delay_r, 0, sizeof(state->delay_r));
+    /* The delay memory is wiped by the incremental clear, as after a preset
+     * load, rather than by a 3 MB memset on the audio thread. */
     for (int slot = 0; slot < SF_FX_SLOTS; ++slot) {
+        state->clear_pos[slot] = 0;
         reset_filters(state, slot);
         state->rev_ready[slot] = 0u;
         state->rev_clear[slot] = 0u;
@@ -642,6 +685,18 @@ static void mix_law(sf_effect_state_t *state, int slot, int type, float mix,
     }
 }
 
+static float knob_rate(sf_effect_state_t *state, int slot, int table, float time_knob) {
+    if (state->rate_key_table[slot] != table || state->rate_key_time[slot] != time_knob) {
+        state->rate_key_table[slot] = table;
+        state->rate_key_time[slot] = time_knob;
+        state->rate[slot] = table == RATE_CHORUS
+            ? table_lerp(g_knob5, g_chorus_rate, 5, time_knob)
+            : table_log(g_knob5, table == RATE_FLANGER ? g_flanger_rate : g_phaser_rate,
+                        5, time_knob);
+    }
+    return state->rate[slot];
+}
+
 static float lfo_triangle(float phase) {
     return phase < 0.5f ? 4.0f * phase - 1.0f : 3.0f - 4.0f * phase;
 }
@@ -659,8 +714,13 @@ void sf_effect_process(sf_effect_state_t *state, int slot, int type, int subtype
     float time_knob = sf_clampf((time_ms - 1.0f) / (SF_FX_TIME_MAX - 1.0f), 0.0f, 1.0f);
     float intensity = sf_clampf(feedback / 0.95f, 0.0f, 1.0f);
 
-    /* Delay storage is cleared incrementally after instance creation. */
-    if (state->clear_pos[slot] < (unsigned)SF_DELAY_SIZE) {
+    /* Delay storage is cleared incrementally after instance creation and
+     * every preset load. Only the effects that read the ring wait for it. The
+     * Reverb clears its own region (below), which the sweep then skips so it
+     * never wipes a live room. */
+    if (type == FX_REVERB && state->clear_pos[slot] < SF_REV_REGION_END)
+        state->clear_pos[slot] = SF_REV_REGION_END;
+    if (state->clear_pos[slot] < (unsigned)SF_DELAY_SIZE && reads_delay_ring(type)) {
         state->delay_l[slot][pos] = 0.0f;
         state->delay_r[slot][pos] = 0.0f;
         state->pos[slot] = (pos + 1u) & (SF_DELAY_SIZE - 1u);
@@ -856,15 +916,15 @@ void sf_effect_process(sf_effect_state_t *state, int slot, int type, int subtype
             }
         }
 
-        float mod_sin = sinf(SF_TWO_PI * state->rev_mod_phase[slot]);
-        float mod_cos = cosf(SF_TWO_PI * state->rev_mod_phase[slot]);
+        float mod_sin = fx_sin_cycle(state->rev_mod_phase[slot]);
+        float mod_cos = fx_sin_cycle(state->rev_mod_phase[slot] + 0.25f);
         float line_out_l[SF_REV_COMBS];
         float line_out_r[SF_REV_COMBS];
         for (int c = 0; c < SF_REV_COMBS; ++c) {
             unsigned base = rev_comb_base[c];
             float damp = state->rev_damp[slot][c];
             for (int ch = 0; ch < 2; ++ch) {
-                unsigned len = reverb_line_len(c, p->line_scale, ch);
+                unsigned len = state->rev_len[slot][c][ch];
                 float *buf = ch ? state->delay_r[slot] : state->delay_l[slot];
                 unsigned idx = state->rev_comb_pos[slot][c][ch];
                 if (idx >= len) idx %= len;
@@ -925,10 +985,9 @@ void sf_effect_process(sf_effect_state_t *state, int slot, int type, int subtype
             float next_l = feed_l + g * h_l[c];
             float next_r = feed_r + g * h_r[c];
             for (int ch = 0; ch < 2; ++ch) {
-                unsigned len = reverb_line_len(c, p->line_scale, ch);
+                unsigned len = state->rev_len[slot][c][ch];
                 float *buf = ch ? state->delay_r[slot] : state->delay_l[slot];
                 unsigned idx = state->rev_comb_pos[slot][c][ch];
-                if (idx >= len) idx %= len;
                 buf[base + idx] = sf_clampf(ch ? next_r : next_l, -4.0f, 4.0f);
                 state->rev_comb_pos[slot][c][ch] = idx + 1u < len ? idx + 1u : 0u;
             }
@@ -954,7 +1013,7 @@ void sf_effect_process(sf_effect_state_t *state, int slot, int type, int subtype
          * more), Time sets the rate. Lush adds a third voice and Single keeps
          * one.
          */
-        float rate = table_lerp(g_knob5, g_chorus_rate, 5, time_knob);
+        float rate = knob_rate(state, slot, RATE_CHORUS, time_knob);
         static const float base_ms[3][3] = {{13.0f, 18.0f, 0.0f},
                                             {11.0f, 15.0f, 19.0f},
                                             {15.0f, 0.0f, 0.0f}};
@@ -973,8 +1032,8 @@ void sf_effect_process(sf_effect_state_t *state, int slot, int type, int subtype
         wet_r = 0.0f;
         for (int v = 0; v < voices; ++v) {
             float offset = (float)v / (float)voices;
-            float lfo_l = sinf(SF_TWO_PI * (phase + offset));
-            float lfo_r = sinf(SF_TWO_PI * (phase + offset + 0.25f));
+            float lfo_l = fx_sin_cycle(phase + offset);
+            float lfo_r = fx_sin_cycle(phase + offset + 0.25f);
             float d = depth_ms[layout][v] * depth_scale;
             float delay_ms_l = sf_clampf(base_ms[layout][v] + d * lfo_l, 0.5f, 40.0f);
             float delay_ms_r = sf_clampf(base_ms[layout][v] + d * lfo_r, 0.5f, 40.0f);
@@ -1006,11 +1065,11 @@ void sf_effect_process(sf_effect_state_t *state, int slot, int type, int subtype
         int sync = subtype == 1 || subtype == 3;
         float rate = sync
             ? (sf_clampf(tempo, 20.0f, 300.0f) / 60.0f) / 2.0f
-            : table_log(g_knob5, g_flanger_rate, 5, time_knob);
+            : knob_rate(state, slot, RATE_FLANGER, time_knob);
         float depth_ms = 0.53f;
         if (silly) { rate *= 1.75f; depth_ms *= 1.5f; }
         float fb = 0.9f * intensity;
-        float lfo = sinf(SF_TWO_PI * state->phase[slot]);
+        float lfo = fx_sin_cycle(state->phase[slot]);
         float delay_ms_l = sf_clampf(0.75f + depth_ms * lfo, 0.05f, 10.0f);
         float delay_ms_r = sf_clampf(0.75f - depth_ms * lfo, 0.05f, 10.0f);
         wet_l = effect_read_delay(state->delay_l[slot], pos,
@@ -1077,7 +1136,7 @@ void sf_effect_process(sf_effect_state_t *state, int slot, int type, int subtype
         wet_r = input_r;
         for (int copy = 0; copy < 6; ++copy) {
             float offset = (float)copy / 6.0f;
-            float modulation = sinf(SF_TWO_PI * (phase + offset));
+            float modulation = fx_sin_cycle(phase + offset);
             float base_ms = 4.0f + (float)copy * spread_ms;
             float delay_ms_l = sf_clampf(base_ms + depth_ms * modulation, 1.0f, 40.0f);
             float delay_ms_r = sf_clampf(base_ms - depth_ms * modulation, 1.0f, 40.0f);
@@ -1157,10 +1216,17 @@ void sf_effect_process(sf_effect_state_t *state, int slot, int type, int subtype
          * down to 551 Hz); Intensity removes bits, quickly: past about a
          * quarter of the knob a voice is down to one bit, a square. The
          * quantiser is mid-rise so one bit still has two levels. */
-        float ratio = exp2f(table_lerp(g_crush_x, g_crush_log2, 11, time_knob));
-        float bits = sf_clampf(16.0f - SF_CRUSH_BITS_SLOPE * intensity, SF_CRUSH_MIN_BITS, 16.0f);
-        float levels = exp2f(bits - 1.0f);
-        state->crush_phase[slot] += 1.0f / ratio;
+        if (state->crush_key_time[slot] != time_knob) {
+            state->crush_key_time[slot] = time_knob;
+            state->crush_step[slot] = 1.0f / exp2f(table_lerp(g_crush_x, g_crush_log2, 11, time_knob));
+        }
+        if (state->crush_key_int[slot] != intensity) {
+            state->crush_key_int[slot] = intensity;
+            float bits = sf_clampf(16.0f - SF_CRUSH_BITS_SLOPE * intensity, SF_CRUSH_MIN_BITS, 16.0f);
+            state->crush_levels[slot] = exp2f(bits - 1.0f);
+        }
+        float levels = state->crush_levels[slot];
+        state->crush_phase[slot] += state->crush_step[slot];
         if (state->crush_phase[slot] >= 1.0f) {
             state->crush_phase[slot] -= 1.0f;
             if (state->crush_phase[slot] >= 1.0f) state->crush_phase[slot] = 0.0f;
@@ -1182,9 +1248,10 @@ void sf_effect_process(sf_effect_state_t *state, int slot, int type, int subtype
         int sample_hold = subtype == 4 || subtype == 5;
         float rate = sync
             ? (sf_clampf(tempo, 20.0f, 300.0f) / 60.0f) / 4.0f
-            : table_log(g_knob5, g_phaser_rate, 5, time_knob);
+            : knob_rate(state, slot, RATE_PHASER, time_knob);
         float lo = space ? 630.0f : 275.0f;
-        float hi = space ? 8000.0f : 1480.0f;
+        /* log2(hi / lo): 1480 / 275 and 8000 / 630. */
+        float octaves = space ? 3.6665927f : 2.4280887f;
         float sweep;
         if (sample_hold) {
             int step = (int)(state->phase[slot] * 8.0f);
@@ -1197,8 +1264,8 @@ void sf_effect_process(sf_effect_state_t *state, int slot, int type, int subtype
         } else {
             sweep = 0.5f + 0.5f * lfo_triangle(state->phase[slot]);
         }
-        float corner = lo * powf(hi / lo, sweep);
-        float t = tanf(SF_PI * corner / SF_SAMPLE_RATE);
+        float corner = lo * exp2f(octaves * sweep);
+        float t = fx_tan_small(SF_PI * corner / SF_SAMPLE_RATE);
         float coefficient = (t - 1.0f) / (t + 1.0f);
         float fb = table_lerp(g_phaser_fb_x, g_phaser_fb, 6, intensity);
         float x_l = input_l + fb * state->phaser_fb[slot][0];

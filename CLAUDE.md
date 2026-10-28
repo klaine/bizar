@@ -11,6 +11,7 @@ CC=cc sh scripts/build.sh --test    # desktop DSP and integration tests (tests/t
 sh scripts/build.sh                 # dsp.so ($CC, else aarch64-linux-gnu-gcc, else zig cc) + dist/ + web build
 sh scripts/build.sh --reference     # regenerate PARAMETER_REFERENCE.md and docs/PRESETS.md
 sh scripts/build.sh --web           # dist/bizar-web.html only (needs a full build once)
+sh scripts/build.sh --profile       # device build with the read-only cpu_us key (not for release)
 sh scripts/pages.sh [--push]        # dist/bizar-web.html as index.html on the `pages` branch (the web build runs it)
 sh scripts/deploy.sh [--personal]   # staged install on a Move (MOVE_HOST, MOVE_USER)
 ```
@@ -45,3 +46,4 @@ The project skills `/build` and `/deploy` in `.claude/skills/` wrap these.
 - `web_ui.html` carries `web_ui_extras.js` inlined between the `sfx` markers
   (`scripts/inline_extras.py`). Edit the `.js`, not the inlined block.
 - `include/` holds the Schwung ABI declarations (so no Schwung checkout is needed).
+- `BACKLOG.md`: features proposed but not started.

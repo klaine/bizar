@@ -2512,6 +2512,122 @@ static void test_mod_rate_setting(void) {
     api->destroy_instance(eighth);
 }
 
+static int polyphony(plugin_api_v2_t *api, void *instance) {
+    char value[32];
+    read_value(api, instance, "polyphony", value, sizeof(value));
+    return atoi(value);
+}
+
+static void midi3(plugin_api_v2_t *api, void *instance, int a, int b, int c) {
+    uint8_t m[3] = {(uint8_t)a, (uint8_t)b, (uint8_t)c};
+    api->on_midi(instance, m, 3, 0);
+}
+
+static void render_blocks(plugin_api_v2_t *api, void *instance, int blocks) {
+    int16_t block[256];
+    for (int i = 0; i < blocks; ++i) api->render_block(instance, block, 128);
+}
+
+/* CC 64 holds released keys until the pedal comes up, in Poly, Mono and the
+ * sequencer alike; CC 121 lets go of the pedal. */
+static void test_sustain_pedal(void) {
+    plugin_api_v2_t *api = move_plugin_init_v2(NULL);
+    void *instance = api->create_instance("", "{\"attack\":1,\"decay\":20,\"sustain\":1,\"release\":1,\"output\":1}");
+    assert(instance != NULL);
+
+    midi3(api, instance, 0xb0, 64, 127);
+    midi3(api, instance, 0x90, 60, 100);
+    midi3(api, instance, 0x90, 64, 100);
+    midi3(api, instance, 0x80, 60, 0);
+    midi3(api, instance, 0x80, 64, 0);
+    render_blocks(api, instance, 40);
+    assert(polyphony(api, instance) == 2);
+    midi3(api, instance, 0xb0, 64, 0);
+    render_blocks(api, instance, 40);
+    assert(polyphony(api, instance) == 0);
+
+    /* A key released while its voice is still waiting on a steal fade. */
+    midi3(api, instance, 0xb0, 64, 127);
+    for (int n = 50; n < 56; ++n) midi3(api, instance, 0x90, n, 100);
+    render_blocks(api, instance, 4);
+    midi3(api, instance, 0x90, 70, 100);
+    midi3(api, instance, 0x80, 70, 0);
+    render_blocks(api, instance, 40);
+    char notes[256];
+    read_value(api, instance, "sounding_notes", notes, sizeof(notes));
+    assert(strstr(notes, "70") != NULL);
+    for (int n = 50; n < 56; ++n) midi3(api, instance, 0x80, n, 0);
+    midi3(api, instance, 0xb0, 121, 0);   /* Reset All Controllers releases the pedal */
+    render_blocks(api, instance, 40);
+    assert(polyphony(api, instance) == 0);
+
+    /* Mono: the last key released with the pedal down keeps sounding. */
+    api->set_param(instance, "voice_mode", "Mono");
+    midi3(api, instance, 0xb0, 64, 127);
+    midi3(api, instance, 0x90, 60, 100);
+    midi3(api, instance, 0x80, 60, 0);
+    render_blocks(api, instance, 40);
+    assert(polyphony(api, instance) == 1);
+    midi3(api, instance, 0xb0, 64, 0);
+    render_blocks(api, instance, 40);
+    assert(polyphony(api, instance) == 0);
+
+    /* Arp: a key released with the pedal down stays in the arpeggio. */
+    api->set_param(instance, "voice_mode", "Poly");
+    api->set_param(instance, "seq_mode", "Arp");
+    midi3(api, instance, 0xb0, 64, 127);
+    midi3(api, instance, 0x90, 60, 100);
+    midi3(api, instance, 0x80, 60, 0);
+    int played = 0;
+    for (int b = 0; b < 400; ++b) {
+        render_blocks(api, instance, 1);
+        played |= polyphony(api, instance) > 0;
+    }
+    assert(played);
+    midi3(api, instance, 0xb0, 64, 0);
+    render_blocks(api, instance, 400);
+    assert(polyphony(api, instance) == 0);
+    api->destroy_instance(instance);
+}
+
+static float g_test_beat;
+static float test_bpm(void) { return 120.0f; }
+static int test_clock(void) { return MOVE_CLOCK_STATUS_RUNNING; }
+static double test_beat(void) { return (double)g_test_beat; }
+
+/* With the host transport running, a synced free LFO takes its phase from the
+ * beat: a falling Saw at 1/4 reads 1 - 2 * frac(beat). */
+static void test_host_transport_lfo(void) {
+    host_api_v1_t host;
+    memset(&host, 0, sizeof(host));
+    host.get_bpm = test_bpm;
+    host.get_clock_status = test_clock;
+    host.get_beat_position = test_beat;
+    plugin_api_v2_t *api = move_plugin_init_v2(&host);
+    void *instance = api->create_instance("", NULL);
+    assert(instance != NULL);
+    api->set_param(instance, "lfo1_shape", "Saw");
+    api->set_param(instance, "lfo1_sync", "On");
+    api->set_param(instance, "lfo1_div", "1/4");
+    api->set_param(instance, "lfo1_retrig", "Free");
+    midi3(api, instance, 0x90, 60, 100);
+    const float beats[2] = {10.25f, 31.75f};
+    for (int k = 0; k < 2; ++k) {
+        g_test_beat = beats[k];
+        render_blocks(api, instance, 1);
+        char text[256];
+        read_value(api, instance, "mod_sources", text, sizeof(text));
+        float v[7];
+        assert(sscanf(text, "[%f,%f,%f,%f,%f,%f,%f]", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6]) == 7);
+        float want = 1.0f - 2.0f * (beats[k] - floorf(beats[k]));
+        if (fabsf(v[2] - want) > 0.01f)
+            fprintf(stderr, "beat %g: lfo1 %g, want %g\n", (double)beats[k], (double)v[2], (double)want);
+        assert(fabsf(v[2] - want) < 0.01f);
+    }
+    api->destroy_instance(instance);
+    move_plugin_init_v2(NULL);
+}
+
 int main(void) {
     test_api_and_param_contract();
     test_device_page_layout();
@@ -2549,6 +2665,8 @@ int main(void) {
     test_cell_destinations();
     test_filter_fm();
     test_keyboard_chord_and_unison_modes();
+    test_sustain_pedal();
+    test_host_transport_lfo();
     puts("Bizar plugin tests passed");
     return 0;
 }

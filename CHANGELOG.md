@@ -2,6 +2,27 @@
 
 ## Unreleased: Bizar
 
+- **Sustain pedal.** CC 64 now holds released keys until the pedal comes up, in
+  Poly, Mono and Unison, and keeps released keys in the arpeggio or sequence in
+  Arp and Seq mode. CC 121 (Reset All Controllers) resets the wheel, this
+  channel's bend and pressure, and lets go of the pedal.
+- **Synced LFOs follow Move's transport.** Bizar now reads tempo from the host
+  (MIDI clock, then the set) and, while the transport runs, its beat position:
+  a synced LFO in Free retrigger mode takes its phase from the beat, as Amino's
+  and Crest's do, so it lines up with the clip. The browser build keeps its own
+  tempo.
+- **Effects come back sooner after a preset change.** The effects that never read
+  the delay memory (Drive, Crusher, Phaser, the EQs, Multi Comp) now play at once,
+  Reverb as soon as its own region is clear, and Delay, Chorus, Flanger and Super
+  Unison after about 64 ms instead of 190 ms. A non-finite sample in the effects
+  now restarts that clear instead of wiping 3 MB in one audio block.
+- **Lighter on the CPU.** A state load is about 7x faster and a preset load 3.5x (one indexed
+  pass over the patch instead of a scan per key), and Chorus, Flanger, Phaser,
+  Super Unison, Crusher and Reverb do less per-sample maths; the sound is the same
+  within 90 dB. The Remote UI's live modulation display repaints only when a value
+  changes. `dsp.so` ships without debug sections, and `scripts/build.sh --profile`
+  builds one with a read-only `cpu_us` key.
+
 - **Web synth start modal.** The browser build now opens with a centred "Start Bizar"
   modal, like Amino and Crest, instead of a small Start audio button in the top bar.
   Its on-screen keyboard is the model the Amino and Crest web pages now follow.

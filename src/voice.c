@@ -219,6 +219,7 @@ void sf_voice_start(sf_voice_t *voice, int index, int note, int velocity,
         voice->steal_channel = channel;
         voice->steal_index = index;
         voice->steal_params = *params;
+        voice->steal_sustained = 0;
         if (!was_pending) {
             float from = voice->last_env_out;
             voice->env_stage = ENV_RELEASE;
@@ -245,6 +246,7 @@ static void voice_start_now(sf_voice_t *voice, int index, int note, int velocity
                             int channel, int legato,
                             const sf_voice_start_params_t *params) {
     voice->active = 1;
+    voice->sustained = 0;
     voice->note = note;
     voice->key = params->key >= 0 ? params->key : note;
     voice->channel = channel;
@@ -419,6 +421,38 @@ void sf_voice_release_note(sf_voice_t voices[SF_MAX_VOICES], int note,
     }
 }
 
+void sf_voice_sustain_note(sf_voice_t voices[SF_MAX_VOICES], int note, int channel) {
+    for (int i = 0; i < SF_MAX_VOICES; ++i) {
+        sf_voice_t *voice = &voices[i];
+        if (!voice->active) continue;
+        int steal_key = voice->steal_params.key >= 0 ? voice->steal_params.key
+                                                     : voice->steal_note;
+        if (voice->steal_pending && steal_key == note && voice->steal_channel == channel)
+            voice->steal_sustained = 1;
+        else if (voice->key == note && voice->channel == channel
+                 && voice->env_stage != ENV_RELEASE)
+            voice->sustained = 1;
+    }
+}
+
+void sf_voice_release_sustained(sf_voice_t voices[SF_MAX_VOICES], float release_ms,
+                                float vel_time, int release_curve) {
+    for (int i = 0; i < SF_MAX_VOICES; ++i) {
+        sf_voice_t *voice = &voices[i];
+        if (!voice->active) continue;
+        if (voice->steal_pending && voice->steal_sustained) {
+            /* As a note-off before the deferred start (sf_voice_release_note). */
+            voice->steal_pending = 0;
+            voice->steal_sustained = 0;
+            voice_begin_release(voice, release_ms, vel_time, release_curve);
+            continue;
+        }
+        if (voice->sustained && !voice->steal_pending && voice->env_stage != ENV_RELEASE)
+            voice_begin_release(voice, release_ms, vel_time, release_curve);
+        voice->sustained = 0;
+    }
+}
+
 void sf_voice_release_channel(sf_voice_t voices[SF_MAX_VOICES], int channel,
                              int immediate, float release_ms, float vel_time,
                              int release_curve) {
@@ -479,6 +513,8 @@ float sf_voice_envelope_sample(sf_voice_t *voice, float attack_step,
                 voice_start_now(voice, voice->steal_index, voice->steal_note,
                                 voice->steal_velocity, voice->steal_channel, 0,
                                 &voice->steal_params);
+                voice->sustained = voice->steal_sustained;
+                voice->steal_sustained = 0;
                 voice->last_env_out = 0.0f;
             }
             break;

@@ -6,13 +6,14 @@
 #   sh scripts/build.sh --test       # native plugin tests
 #   sh scripts/build.sh --reference  # regenerate PARAMETER_REFERENCE.md, docs/PRESETS.md
 #   sh scripts/build.sh --web        # browser build only
+#   sh scripts/build.sh --profile    # device build with the cpu_us debug key (not for release)
 #
 # The device compiler is $CC if set, else aarch64-linux-gnu-gcc, else zig cc
 # (brew install zig; set ZIG=/path/to/zig to override the lookup).
 set -eu
 
 case "${1:-}" in
-    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
 esac
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -89,6 +90,13 @@ if [ "${1:-}" = "--test" ]; then
     exit 0
 fi
 
+# --profile: the render time in microseconds as the read-only cpu_us key.
+PROFILE_FLAGS=
+if [ "${1:-}" = "--profile" ]; then
+    PROFILE_FLAGS=-DSF_PROFILE
+    printf 'profile build: cpu_us key enabled (not for release)\n'
+fi
+
 # zig cc is the fallback when no GNU cross compiler is installed (the usual
 # case on macOS). The target flags can't live in $CC, which is quoted below.
 ZIG=${ZIG:-zig}
@@ -104,8 +112,9 @@ if [ -z "${CC:-}" ]; then
         exit 1
     fi
 fi
-# -ffile-prefix-map: no absolute build paths (and so no user name) in shipped binaries
-"$CC" $CC_TARGET -std=c11 -O3 -fPIC -shared -Wall -Wextra -Werror -D_GNU_SOURCE \
+# -ffile-prefix-map: no absolute build paths (and so no user name) in shipped binaries.
+# -s: no debug sections in the package (half a megabyte the device never reads).
+"$CC" $CC_TARGET -std=c11 -O3 -fPIC -shared -s -Wall -Wextra -Werror -D_GNU_SOURCE $PROFILE_FLAGS \
     -ffile-prefix-map="$ROOT"=. \
     -I"$ROOT/include" \
     -I"$GENERATED_DIR" \

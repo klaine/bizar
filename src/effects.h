@@ -8,6 +8,8 @@
  * clear below is sized so this larger buffer is ready shortly after startup. */
 #define SF_DELAY_SIZE 131072
 #define SF_FX_CLEAR_CHUNK 2048
+/* Samples per block for a slot whose effect is waiting on the clear. */
+#define SF_FX_CLEAR_CHUNK_WAITING 6144
 
 /* Reverb network: four input-diffusion all-pass filters feeding a four-line
  * feedback delay network (FDN), laid out at fixed offsets inside the slot's
@@ -122,6 +124,8 @@ typedef struct {
      * when Time, Intensity or the preset change. */
     float rev_gain[SF_FX_SLOTS][SF_REV_COMBS];
     float rev_damp[SF_FX_SLOTS][SF_REV_COMBS];
+    /* Line lengths per channel for the preset in rev_key_sub. */
+    unsigned rev_len[SF_FX_SLOTS][SF_REV_COMBS][2];
     float rev_level[SF_FX_SLOTS];
     float rev_key_time[SF_FX_SLOTS];
     float rev_key_fb[SF_FX_SLOTS];
@@ -135,6 +139,16 @@ typedef struct {
     sf_biquad_t delay_bq[SF_FX_SLOTS][3];
     float delay_z[SF_FX_SLOTS][2][3][2];
     unsigned delay_bq_ready[SF_FX_SLOTS];
+    /* Knob-curve results kept with the control value (and curve) they were
+     * computed for: the Chorus, Flanger and Phaser rates, and the Crusher's
+     * hold step and quantiser levels. A key out of range marks them unset. */
+    int rate_key_table[SF_FX_SLOTS];
+    float rate_key_time[SF_FX_SLOTS];
+    float rate[SF_FX_SLOTS];
+    float crush_key_time[SF_FX_SLOTS];
+    float crush_key_int[SF_FX_SLOTS];
+    float crush_step[SF_FX_SLOTS];
+    float crush_levels[SF_FX_SLOTS];
 } sf_effect_state_t;
 
 void sf_effect_state_init(sf_effect_state_t *state,
@@ -149,7 +163,9 @@ void sf_effect_state_smooth(sf_effect_state_t *state,
                             const float peak_frequency[SF_FX_SLOTS],
                             const float peak_gain[SF_FX_SLOTS],
                             const float peak_width[SF_FX_SLOTS], float amount);
-void sf_effect_clear_buffers(sf_effect_state_t *state);
+/* type: each slot's effect type, so a slot that waits on the clear gets a
+ * bigger share (NULL: the small chunk everywhere). */
+void sf_effect_clear_buffers(sf_effect_state_t *state, const int type[SF_FX_SLOTS]);
 /* Clears every buffer and filter memory after a non-finite sample so a NaN in
  * a feedback path cannot latch. */
 void sf_effect_reset_nonfinite(sf_effect_state_t *state);

@@ -3247,6 +3247,114 @@ static void test_delay_lines_cleared_on_use(void) {
            && !sf_engine2_uses_delay(ENGINE_MULTIFILTER));
 }
 
+/* One effect slot driven directly, past its incremental clear. */
+static sf_effect_state_t g_fx_test_state;
+
+static void fx_test_init(void) {
+    const float zero3[SF_FX_SLOTS] = {0.0f, 0.0f, 0.0f};
+    const float eq[SF_FX_SLOTS][3] = {{0.0f}};
+    const float peak_hz[SF_FX_SLOTS] = {1000.0f, 1000.0f, 1000.0f};
+    const float width[SF_FX_SLOTS] = {1.0f, 1.0f, 1.0f};
+    const int delay_types[SF_FX_SLOTS] = {FX_DELAY, FX_DELAY, FX_DELAY};
+    sf_effect_state_init(&g_fx_test_state, zero3, eq, peak_hz, zero3, width);
+    for (int i = 0; i < 64; ++i) sf_effect_clear_buffers(&g_fx_test_state, delay_types);
+}
+
+static float fx_test_sample(int type, float time_ms, float input) {
+    float l, r;
+    sf_effect_process(&g_fx_test_state, 0, type, 0, 1.0f, time_ms, 0.0f, 120.0f,
+                      input, input, &l, &r);
+    return l;
+}
+
+/* The Delay's read: a position just below the cursor's start wrapped up to
+ * exactly the ring's size, one past its end, and the echo of the first sample
+ * at 300 ms (13230.001 samples) was lost; and reading at (float)pos - delay
+ * rounded the position to the grid of the result, so taps jittered with the
+ * cursor. Each echo must come back whole and land on the delay exactly. */
+static void test_delay_read_is_exact(void) {
+    for (int pass = 0; pass < 2; ++pass) {
+        float time_ms = pass == 0 ? 300.0f : 333.3f;
+        float delay = time_ms * 0.001f * 44100.0f;   /* as the Delay works it out */
+        int spacing = pass == 0 ? 7000 : 1000;
+        fx_test_init();
+        static float out[3 * 44100 + 20000];
+        int length = (int)(sizeof(out) / sizeof(out[0]));
+        for (int s = 0; s < length; ++s)
+            out[s] = fx_test_sample(FX_DELAY, time_ms, s % spacing == 0 ? 1.0f : 0.0f);
+        float first_sum = -1.0f;
+        for (int n = 0; n + (int)delay + 3 < length; n += spacing) {
+            int t0 = n + (int)delay;
+            float sum = 0.0f, moment = 0.0f;
+            for (int t = t0 - 1; t <= t0 + 2; ++t) {
+                sum += out[t];
+                moment += out[t] * (float)(t - n);
+            }
+            if (first_sum < 0.0f) first_sum = sum;
+            assert(sum > 0.1f && fabsf(sum - first_sum) < 1e-4f * first_sum);
+            assert(fabsf(moment / sum - delay) < 1e-3f);
+        }
+    }
+}
+
+/* Reverb -> Delay -> Reverb, back before the Delay's wait on the clear ends:
+ * the room must start clean, not resume the old lines. */
+static void test_reverb_rearms_after_a_quick_switch(void) {
+    fx_test_init();
+    uint32_t rng = 1u;
+    for (int s = 0; s < 8000; ++s) {
+        rng = rng * 1664525u + 1013904223u;
+        (void)fx_test_sample(FX_REVERB, 400.0f, (float)(rng >> 8) / 8388608.0f - 1.0f);
+    }
+    g_fx_test_state.clear_pos[0] = 0;   /* the Delay that follows waits on the clear */
+    for (int s = 0; s < 64; ++s) (void)fx_test_sample(FX_DELAY, 400.0f, 0.0f);
+    for (int s = 0; s < 8000; ++s) assert(fx_test_sample(FX_REVERB, 400.0f, 0.0f) == 0.0f);
+}
+
+/* The FX Crusher's mid-rise quantiser has no zero level: digital silence used
+ * to come out as a constant half step (0.011, -39 dBFS, by default). */
+static void test_fx_crusher_keeps_silence(void) {
+    plugin_api_v2_t *api = move_plugin_init_v2(NULL);
+    void *instance = api->create_instance("", NULL);
+    api->set_param(instance, "fx1_type", "Crusher");
+    api->set_param(instance, "fx1_mix", "1");
+    int16_t block[256];
+    for (int b = 0; b < 200; ++b) {
+        api->render_block(instance, block, 128);
+        if (b < 20) continue;   /* the Amount smooths in */
+        for (int i = 0; i < 256; ++i) assert(block[i] == 0);
+    }
+    api->destroy_instance(instance);
+}
+
+/* A route into an EQ moves it in the block the route changes in: the EQ's
+ * knobs were smoothed before the block's routes resolved, so they followed a
+ * block late. */
+static void test_eq_route_takes_effect_at_once(void) {
+    plugin_api_v2_t *api = move_plugin_init_v2(NULL);
+    void *moved = api->create_instance("", NULL);
+    void *still = api->create_instance("", NULL);
+    void *both[2] = {moved, still};
+    for (int i = 0; i < 2; ++i) {
+        api->set_param(both[i], "fx1_type", "3-Band EQ");
+        api->set_param(both[i], "modcol1_dest", "F1T");
+        api->set_param(both[i], "modcol1_whl", "1");
+        midi3(api, both[i], 0x90, 48, 100);
+    }
+    int16_t a[256], b[256];
+    for (int k = 0; k < 40; ++k) {
+        api->render_block(moved, a, 128);
+        api->render_block(still, b, 128);
+        assert(memcmp(a, b, sizeof(a)) == 0);
+    }
+    midi3(api, moved, 0xb0, 1, 127);   /* the wheel: the route's source */
+    api->render_block(moved, a, 128);
+    api->render_block(still, b, 128);
+    assert(memcmp(a, b, sizeof(a)) != 0);
+    api->destroy_instance(moved);
+    api->destroy_instance(still);
+}
+
 int main(void) {
     test_api_and_param_contract();
     test_device_page_layout();
@@ -3301,6 +3409,10 @@ int main(void) {
     test_harm_high_note_sounds();
     test_audio_in_metallic_phase_runs_on();
     test_delay_lines_cleared_on_use();
+    test_delay_read_is_exact();
+    test_reverb_rearms_after_a_quick_switch();
+    test_fx_crusher_keeps_silence();
+    test_eq_route_takes_effect_at_once();
     puts("Bizar plugin tests passed");
     return 0;
 }

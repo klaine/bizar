@@ -254,8 +254,8 @@ typedef struct {
     float fx_peak_frequency[SF_FX_SLOTS];
     float fx_peak_gain[SF_FX_SLOTS];
     float fx_peak_width[SF_FX_SLOTS];
-    /* Last block's routes into each slot's Time, Intensity and Amount, for the
-     * EQs, whose knobs are smoothed before this block's routes resolve. */
+    /* This block's routes into each slot's Time, Intensity and Amount, which
+     * the EQs read as band gains or frequency, gain and width. */
     float fx_route[SF_FX_SLOTS][3];
     sf_effect_state_t fx_state;
     float bend_ratio[16];
@@ -3673,20 +3673,7 @@ static void sf_render_block(void *instance, int16_t *out, int frames) {
         sm_cur[k] = prev;
         sm_inc[k] = frames > 0 ? (*sm_ptr[k] - prev) / (float)frames : 0.0f;
     }
-    {
-        float eq_db[SF_FX_SLOTS][3];
-        float peak_hz[SF_FX_SLOTS], peak_gain[SF_FX_SLOTS], peak_width[SF_FX_SLOTS];
-        for (int slot = 0; slot < SF_FX_SLOTS; ++slot) {
-            memcpy(eq_db[slot], inst->fx_eq_db[slot], sizeof(eq_db[slot]));
-            peak_hz[slot] = inst->fx_peak_frequency[slot];
-            peak_gain[slot] = inst->fx_peak_gain[slot];
-            peak_width[slot] = inst->fx_peak_width[slot];
-            sf_effect_mod_eq(inst->fx_type[slot], inst->fx_route[slot], eq_db[slot],
-                             &peak_hz[slot], &peak_gain[slot], &peak_width[slot]);
-        }
-        sf_effect_state_smooth(&inst->fx_state, inst->fx_mix, eq_db,
-                               peak_hz, peak_gain, peak_width, smooth);
-    }
+    sf_effect_smooth_mix(&inst->fx_state, inst->fx_mix, smooth);
 
     float pan_for_voice[SF_MAX_VOICES] = {0.0f};
     if (inst->voice_mode != VOICE_MONO && inst->stereo > 0.0f) {
@@ -3965,6 +3952,30 @@ static void sf_render_block(void *instance, int16_t *out, int frames) {
             }
         }
     }
+
+    {
+        /* The EQs follow this block's routes, worked out just above. */
+        float eq_db[SF_FX_SLOTS][3];
+        float peak_hz[SF_FX_SLOTS], peak_gain[SF_FX_SLOTS], peak_width[SF_FX_SLOTS];
+        for (int slot = 0; slot < SF_FX_SLOTS; ++slot) {
+            memcpy(eq_db[slot], inst->fx_eq_db[slot], sizeof(eq_db[slot]));
+            peak_hz[slot] = inst->fx_peak_frequency[slot];
+            peak_gain[slot] = inst->fx_peak_gain[slot];
+            peak_width[slot] = inst->fx_peak_width[slot];
+            sf_effect_mod_eq(inst->fx_type[slot], inst->fx_route[slot], eq_db[slot],
+                             &peak_hz[slot], &peak_gain[slot], &peak_width[slot]);
+        }
+        sf_effect_smooth_eq(&inst->fx_state, eq_db, peak_hz, peak_gain, peak_width, smooth);
+    }
+
+    /* The effects' controls are fixed for the block: resolve them once. An
+     * Off slot returns NULL and is skipped per sample. */
+    sf_effect_fn fx_fn[SF_FX_SLOTS];
+    for (int slot = 0; slot < SF_FX_SLOTS; ++slot)
+        fx_fn[slot] = sf_effect_prepare(&inst->fx_state, slot, inst->fx_type[slot],
+                                        inst->fx_subtype[slot], fx_mix_voice[slot],
+                                        fx_time_voice[slot], fx_feedback_voice[slot],
+                                        tempo, frames);
 
     /* A tick's ramp, LFO span and countdown all use the divider in force when
      * it runs, so changing Mod Rate mid-note only changes the next tick. */
@@ -4291,14 +4302,10 @@ static void sf_render_block(void *instance, int16_t *out, int frames) {
         if (g2_wrap) ++inst->lfo2_wraps;
 
         for (int slot = 0; slot < SF_FX_SLOTS; ++slot) {
-            float next_l, next_r;
-            sf_effect_process(&inst->fx_state, slot, inst->fx_type[slot],
-                              inst->fx_subtype[slot],
-                              fx_mix_voice[slot], fx_time_voice[slot],
-                              fx_feedback_voice[slot], tempo,
-                              left, right, &next_l, &next_r);
-            left = next_l;
-            right = next_r;
+            if (!fx_fn[slot]) continue;
+            sf_fx_frame_t next = fx_fn[slot](&inst->fx_state, slot, left, right);
+            left = next.l;
+            right = next.r;
         }
         if (!isfinite(left) || !isfinite(right)) {
             /* Non-finite master sample: output silence and clear FX state so
@@ -4321,9 +4328,12 @@ static void sf_render_block(void *instance, int16_t *out, int frames) {
         inst->last_out[0] = left;
         inst->last_out[1] = right;
         /* Round, not truncate: truncation toward zero is a dead band that
-         * puts distortion on the harmonics of quiet, dark sounds. */
-        out[frame * 2] = (int16_t)lrintf(left * 32767.0f);
-        out[frame * 2 + 1] = (int16_t)lrintf(right * 32767.0f);
+         * puts distortion on the harmonics of quiet, dark sounds. rintf
+         * rounds the same way as lrintf and the value is within +/-32767,
+         * but unlike lrintf it never sets errno, so the device build
+         * (-fmath-errno) inlines it instead of calling libm twice a sample. */
+        out[frame * 2] = (int16_t)rintf(left * 32767.0f);
+        out[frame * 2 + 1] = (int16_t)rintf(right * 32767.0f);
     }
     sf_restore_fpcr(saved_fpcr);
 #ifdef SF_PROFILE

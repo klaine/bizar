@@ -1,6 +1,8 @@
 #ifndef BIZAR_EFFECTS_H
 #define BIZAR_EFFECTS_H
 
+#include <stdint.h>
+
 #define SF_FX_SLOTS 3
 /* Delay memory is shared by every effect. 131072 samples is 2.97 s at 44.1
  * kHz, enough for a 1/1 delay at 80 BPM (the old 16384-sample buffer only held
@@ -46,6 +48,31 @@ enum {
     FX_TYPE_COUNT = 12
 };
 
+/* One slot's controls for the current block (type, subtype, mix, Time,
+ * Intensity, tempo, all constant for a block) and what they work out to, set
+ * by sf_effect_prepare: the knob curves, mix law, delay lengths and LFO rates
+ * are computed once per block instead of every sample. */
+typedef struct {
+    int type, subtype;
+    float mix, time_ms, feedback, tempo;
+    float time_knob, intensity;
+    float dry, wet;
+    /* Delay: both lines' lengths in samples (clamped), the wet gain. */
+    float delay_samples[2];
+    float delay_gain;
+    /* Chorus, Flanger, Super Unison: the LFO's phase step per sample, and
+     * per voice or copy the centre delay and swing (ms). */
+    float phase_inc;
+    float base_ms[6];
+    float depth_ms[6];
+    float fb;
+    float voice_gain;
+    int voices;
+    /* Super Unison tone: 0 bypass, 1 low-pass, 2 high-pass. */
+    int tone_mode;
+    float tone_alpha;
+} sf_fx_block_t;
+
 typedef struct {
     float mix_smooth[SF_FX_SLOTS];
     float eq_smooth_db[SF_FX_SLOTS][3];
@@ -53,6 +80,8 @@ typedef struct {
     float peak_frequency_smooth[SF_FX_SLOTS];
     float peak_gain_smooth[SF_FX_SLOTS];
     float peak_width_smooth[SF_FX_SLOTS];
+    /* The smoothed frequency, gain and width the coefficients were built for. */
+    float peak_key[SF_FX_SLOTS][3];
     float peak_b0[SF_FX_SLOTS];
     float peak_b1[SF_FX_SLOTS];
     float peak_b2[SF_FX_SLOTS];
@@ -123,13 +152,20 @@ typedef struct {
     float rev_mod_cos[SF_FX_SLOTS][SF_REV_COMBS][2];
     unsigned rev_ready[SF_FX_SLOTS];
     unsigned rev_clear[SF_FX_SLOTS];
-    /* Per-line loop gain and damping, derived from a decay time; rebuilt only
-     * when Time, Intensity or the preset change. */
-    float rev_gain[SF_FX_SLOTS][SF_REV_COMBS];
-    float rev_damp[SF_FX_SLOTS][SF_REV_COMBS];
     /* Line lengths per channel for the preset in rev_key_sub. */
     unsigned rev_len[SF_FX_SLOTS][SF_REV_COMBS][2];
     float rev_level[SF_FX_SLOTS];
+    /* Per tap (lane 2 * line + channel): the damping, 1 - that and the loop
+     * gain, derived from a decay time and rebuilt only when Time, Intensity
+     * or the preset change; and the preset's pre-delay in samples. */
+    float rev_damp_lane[SF_FX_SLOTS][SF_REV_COMBS * 2];
+    float rev_damp1_lane[SF_FX_SLOTS][SF_REV_COMBS * 2];
+    float rev_gain_lane[SF_FX_SLOTS][SF_REV_COMBS * 2];
+    /* sin * rev_mod_sin + cos * rev_mod_cos per tap at the current
+     * rev_mod_phase, worked out at the end of the sample before so the next
+     * sample's taps do not wait on the sine. */
+    float rev_mod_u[SF_FX_SLOTS][SF_REV_COMBS * 2];
+    unsigned rev_pre_len[SF_FX_SLOTS];
     float rev_key_time[SF_FX_SLOTS];
     float rev_key_fb[SF_FX_SLOTS];
     int rev_key_sub[SF_FX_SLOTS];
@@ -152,6 +188,23 @@ typedef struct {
     float crush_key_int[SF_FX_SLOTS];
     float crush_step[SF_FX_SLOTS];
     float crush_levels[SF_FX_SLOTS];
+    /* Phaser values that only move with a control, kept with their keys: the
+     * phase step (keyed on Sync and the tempo or Time knob), the feedback
+     * (keyed on Intensity) and, for the SnH presets, the all-pass coefficient
+     * of the held sweep position (keyed on it and the Space flag). */
+    int phaser_key_sync[SF_FX_SLOTS];
+    float phaser_key_rate[SF_FX_SLOTS];
+    float phaser_inc[SF_FX_SLOTS];
+    float phaser_key_int[SF_FX_SLOTS];
+    float phaser_fb_amount[SF_FX_SLOTS];
+    int phaser_key_space[SF_FX_SLOTS];
+    float phaser_key_sweep[SF_FX_SLOTS];
+    float phaser_coef[SF_FX_SLOTS];
+    /* Multi Comp detector coefficients, keyed on the Time knob. */
+    float comp_key_time[SF_FX_SLOTS];
+    float comp_attack[SF_FX_SLOTS];
+    float comp_release[SF_FX_SLOTS];
+    sf_fx_block_t blk[SF_FX_SLOTS];
 } sf_effect_state_t;
 
 void sf_effect_state_init(sf_effect_state_t *state,
@@ -160,12 +213,17 @@ void sf_effect_state_init(sf_effect_state_t *state,
                           const float peak_frequency[SF_FX_SLOTS],
                           const float peak_gain[SF_FX_SLOTS],
                           const float peak_width[SF_FX_SLOTS]);
-void sf_effect_state_smooth(sf_effect_state_t *state,
-                            const float mix[SF_FX_SLOTS],
-                            const float eq_db[SF_FX_SLOTS][3],
-                            const float peak_frequency[SF_FX_SLOTS],
-                            const float peak_gain[SF_FX_SLOTS],
-                            const float peak_width[SF_FX_SLOTS], float amount);
+/* The effects' block-rate smoothing, in two halves: each slot's Amount at the
+ * start of the block, and the EQs' band gains and Peak EQ frequency, gain and
+ * width once the block's modulation routes into them are known (so a route
+ * into an EQ moves it in the same block, not the next). */
+void sf_effect_smooth_mix(sf_effect_state_t *state, const float mix[SF_FX_SLOTS],
+                         float amount);
+void sf_effect_smooth_eq(sf_effect_state_t *state,
+                         const float eq_db[SF_FX_SLOTS][3],
+                         const float peak_frequency[SF_FX_SLOTS],
+                         const float peak_gain[SF_FX_SLOTS],
+                         const float peak_width[SF_FX_SLOTS], float amount);
 /* type: each slot's effect type, so a slot that waits on the clear gets a
  * bigger share (NULL: the small chunk everywhere). */
 void sf_effect_clear_buffers(sf_effect_state_t *state, const int type[SF_FX_SLOTS]);
@@ -180,6 +238,20 @@ float sf_effect_mod_mix(int type, float mix, float offset);
  * or frequency, gain and width: route = Time, Intensity, Amount offsets. */
 void sf_effect_mod_eq(int type, const float route[3], float eq_db[3],
                       float *peak_hz, float *peak_gain, float *peak_width);
+/* One sample of a slot's effect, with the controls sf_effect_prepare stored. */
+typedef struct {
+    float l, r;
+} sf_fx_frame_t;
+typedef sf_fx_frame_t (*sf_effect_fn)(sf_effect_state_t *state, int slot,
+                                      float input_l, float input_r);
+/* Once per block per slot, before its samples: resolves the controls and the
+ * type bookkeeping, and returns the function to run per sample, or NULL for
+ * a slot that is Off (whose block is then already accounted for: it passes
+ * its input through). frames is the block length. */
+sf_effect_fn sf_effect_prepare(sf_effect_state_t *state, int slot, int type, int subtype,
+                               float mix, float time_ms, float feedback, float tempo,
+                               int frames);
+/* The old per-sample entry point: prepare plus one sample. */
 void sf_effect_process(sf_effect_state_t *state, int slot, int type, int subtype,
                        float mix, float time_ms, float feedback, float tempo,
                        float input_l, float input_r,

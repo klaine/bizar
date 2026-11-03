@@ -35,6 +35,30 @@
   above about 10 kHz.
 - **Fixed: the Audio In stand-in's metallic noise clicked on every cycle of
   the note.** It now runs on a phase of its own.
+- **The effects take far less CPU, and an empty slot costs nothing.** Each slot
+  now works out its settings once per block instead of every sample, an Off
+  slot is skipped entirely, and the Reverb runs its delay lines four at a time.
+  With the same effect in all three slots:
+  - The Reverb takes about 40% less.
+  - Chorus, Flanger, Super Unison and the Phaser's SnH presets take about 25-30% less.
+  - Delay, the EQs, Multi Comp and Crusher take about 20% less.
+
+  A six-voice patch with no effects renders about 10% faster. The sound is
+  unchanged bit for bit, apart from the fixes below.
+- **Fixed: Delay, Chorus, Flanger and Super Unison could read one sample past
+  their memory, and placed their taps imprecisely.** A tap position just
+  before the start of the memory wrapped to one past its end and read
+  whatever came next: with a 300 ms Delay, a one-sample dropout every
+  3 seconds. Tap positions were also rounded more coarsely the further the
+  write cursor had travelled, which added faint grain. The whole and
+  fractional parts of a delay are now kept apart. The output moves by a few
+  LSB at most.
+- **Fixed: a route into the 3-Band or Peak EQ took effect a block late.** The
+  EQs now follow the same block's modulation.
+- **Fixed: switching Reverb to Delay and quickly back could bring the old room
+  back.** Leaving Reverb now always resets it.
+- **Fixed: the FX Crusher turned silence into a constant offset** (-39 dBFS at
+  its default settings). Silence now stays silent.
 - **Fixed: Mono with Env Reset cut the held note dead and never glided.** A
   legato note now fades the sounding one out over 3 ms, as a voice steal does,
   then restarts the envelope from zero, and its pitch glides from the old note

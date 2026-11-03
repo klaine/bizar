@@ -149,16 +149,17 @@ if [ -z "$VERSION" ]; then
     exit 1
 fi
 
-# COPYFILE_DISABLE keeps macOS tar from adding ._ AppleDouble files.
+# COPYFILE_DISABLE keeps macOS tar from adding ._ AppleDouble files; --numeric-owner leaves the
+# builder's user and group names out of the headers, --no-xattrs the com.apple.* attributes.
 if [ -n "$BANK" ]; then
     # A personal build: never under the release name.
     TARBALL="$ROOT/dist/bizar-module-personal.tar.gz"
-    COPYFILE_DISABLE=1 tar -czf "$TARBALL" --exclude '.DS_Store' -C "$ROOT/dist" bizar
+    COPYFILE_DISABLE=1 tar -czf "$TARBALL" --numeric-owner --no-xattrs --exclude '.DS_Store' -C "$ROOT/dist" bizar
     printf 'Built %s (includes MiniFreak presets: personal use only, do not publish)\n' "$TARBALL"
 else
     TARBALL="$ROOT/dist/bizar-module.tar.gz"
     VERSIONED="$ROOT/dist/bizar-module-$VERSION.tar.gz"
-    COPYFILE_DISABLE=1 tar -czf "$TARBALL" --exclude '.DS_Store' -C "$ROOT/dist" bizar
+    COPYFILE_DISABLE=1 tar -czf "$TARBALL" --numeric-owner --no-xattrs --exclude '.DS_Store' -C "$ROOT/dist" bizar
     cp "$TARBALL" "$VERSIONED"
     printf 'Built %s\n' "$TARBALL"
     printf 'Built %s (version %s)\n' "$VERSIONED" "$VERSION"

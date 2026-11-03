@@ -1,63 +1,130 @@
 # Bizar
 
-Bizar is a hybrid synthesizer for Ableton Move, running as a sound-generator
-module in the [Schwung](https://github.com/charlesvestal/schwung) framework.
-It has two interacting digital engines, a modulation grid, a Cycling
-Envelope, a sequencer and arpeggiator, and three effect slots, with 128
-original factory presets.
+Bizar is a two-engine hybrid synthesizer for [Ableton Move](https://www.ableton.com/move/),
+running as a sound-generator module in [Schwung](https://github.com/charlesvestal/schwung).
+Two digital oscillators with more than two dozen engines each, a resonant filter, two LFOs, a Cycling Envelope,
+a 12-column modulation matrix, four macros, three effect slots, a sequencer and an arpeggiator,
+and 128 original presets, all playable from Move's knobs and pads.
 
-**Try it live:** [play Bizar in your browser](https://klaine.github.io/bizar/) (WebAssembly build, WebMIDI).
+- **Play it in your browser:** <https://klaine.github.io/bizar/> (the same DSP compiled to
+  WebAssembly, with WebMIDI)
+- **Download for Move:** [latest release](https://github.com/klaine/bizar/releases/latest)
+- **Every page and knob:** [PARAMETER_REFERENCE.md](PARAMETER_REFERENCE.md)
+- **Every preset:** [docs/PRESETS.md](docs/PRESETS.md)
+- **What changed:** [CHANGELOG.md](CHANGELOG.md)
 
-Bizar takes its workflow from two-engine performance synths like Arturia's
-MiniFreak. It is not an Arturia product and is not affiliated with Arturia.
-It contains no Arturia code, firmware, presets or sample data. If you own a
-MiniFreak, you can build Bizar with your own exported presets for personal
-use; see [docs/MINIFREAK_IMPORT.md](docs/MINIFREAK_IMPORT.md).
+Bizar takes its workflow from two-engine performance synths such as Arturia's MiniFreak. It is
+not an Arturia product and is not affiliated with Arturia, and it contains no Arturia code,
+firmware, presets or samples. Several engines are adapted from Emilie Gillet's Plaits (MIT); see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-## Features
+## Installing on Move
 
-- **Voices.** Six-voice polyphony, plus Mono and Unison (mono or poly stacks),
-  a keyboard Chord mode, voice stealing and portamento. Responds to MIDI
-  velocity, pitch bend, channel pressure and polyphonic aftertouch.
-- **Two engines.** Oscillator 1 offers BasicWaves, Two Op FM, Wavefolder,
-  Noise, Wavetable, SuperWave, Harmo, Formant, V.Analog, Waveshaper,
-  Chords, KarplusStr, SawX, Harm, Bass, an inharmonic Modal resonator and a
-  Speech formant engine. Oscillator 2 has the same generators plus processor
-  modes that work on Oscillator 1: Ring, Wavefolder, MultiFilter,
-  Crusher, Comb Filter, Surgeon Filter, Phaser Filter, Destroy and FM / RM.
-  Each oscillator has Tune, Type, Wave, Timbre, Shape and Volume, and the three
-  timbre controls mean something specific to each engine. Several engines are
-  adapted from Emilie Gillet's Plaits; see `THIRD_PARTY_NOTICES.md`.
-- **Wavetables.** Thirty-two 64-frame banks from the CC0 WaveEdit Online
-  collection, with anti-aliased mip levels. Both oscillators pick a bank with a
-  separate Wavetable selector; the knobs are then Position, Width and Tone.
-  Sources are listed in `assets/wavetables/README.md`.
-- **Filter and envelopes.** A per-voice resonant LP/BP/HP filter, an ADSR with
-  Quick and Percussive curve options and a retrigger switch, and velocity
-  targets for VCA, VCF, envelope depth and envelope time.
-- **Modulation.** Two LFOs with nine shapes (including an editable Shaper),
-  tempo sync and retrigger modes; a Cycling Envelope with Rise/Hold/Fall and
-  Env/Run/Loop modes; and a modulation grid of twelve destination columns fed
-  by seven sources (Cycling Envelope, Envelope, LFO 1, LFO 2, Velocity +
-  Aftertouch, Wheel and Key Track). Four macros each drive four destinations, and any
-  matrix cell (`M4:3` = LFO 2 into column 3) can itself be a destination.
-- **Effects.** Three serial stereo slots with Delay (seven characters, each
-  also tempo-synced), Reverb, Chorus, Flanger, Super Unison, Drive, Bit
-  Crusher, Phaser, 3-band EQ, Peak EQ and a three-band Multi Comp. Each effect
-  has its own preset list.
-- **Sequencer and arpeggiator.** See below.
-- **Move integration.** Schwung's `ui_hierarchy`, `chain_params` and `state`
-  contracts drive Move's parameter pages, automation and patch saving. Every
-  page and control is listed in [PARAMETER_REFERENCE.md](PARAMETER_REFERENCE.md).
-- **Remote UI.** A browser editor with knobs, draggable envelope and Shaper
-  curves, a filter response view, waveform previews, the full modulation
-  matrix with hardware-style mod assign, and a sequencer editor.
+Bizar needs a Move with [Schwung](https://github.com/charlesvestal/schwung) installed.
 
-## Factory presets
+1. Download `bizar-module.tar.gz` from the
+   [latest release](https://github.com/klaine/bizar/releases/latest).
+2. Install it with Schwung Manager, or by hand: extract the archive so that it lands at
+   `/data/UserData/schwung/modules/sound_generators/bizar/` on the Move.
+3. Rescan modules in Schwung Manager, or restart Schwung.
 
-Bizar ships 128 original presets, sixteen in each of eight categories. Each
-name starts with a two-letter category tag so the list is easy to browse on
-Move's small display:
+Bizar then appears under Sound Generators as **BIZR**.
+
+Developers with SSH access can install a local build with `sh scripts/deploy.sh`
+(macOS and Linux) or `scripts/install-windows.ps1` (Windows, see
+[Building from source](#building-from-source)). Both stage the files on the Move's data
+partition and rename them into place, so a running Schwung is not disturbed.
+
+## How it works
+
+The signal path is one voice of a classic hybrid synth, six times over:
+
+```
+Osc 1 ──┐
+        ├─ mix ─ Filter (LP/BP/HP) ─ VCA ─┐
+Osc 2 ──┘                                 ├─ Effect 1 ─ Effect 2 ─ Effect 3 ─ out
+   ▲ (can process Osc 1)      other voices ┘
+```
+
+Everything below is reachable from Move's parameter pages, and most of it from the Remote UI
+too.
+
+### Oscillators
+
+Each oscillator has **Type**, **Wave**, **Timbre**, **Shape**, **Tune** and **Volume**. The three
+timbre knobs mean something specific to each engine, and the page relabels them when the type
+changes (a wavetable engine's Wave knob becomes Position, for example).
+
+**Oscillator 1** chooses from BasicWaves, Two Op FM, Wavefolder, Noise, Wavetable, SuperWave,
+Harmo, Formant, V.Analog, Waveshaper, Chords, KarplusStr, SawX, Harm, Bass, Modal and Speech.
+
+**Oscillator 2** has the same generators plus processor modes that work on Oscillator 1's
+signal: Ring, Wavefolder, MultiFilter, Crusher, Comb Filter, Surgeon Filter, Phaser Filter,
+Destroy and FM / RM. That is where the "hybrid" comes from: Osc 2 can be a second voice or a
+treatment of the first.
+
+The **Wavetable** engine picks one of 32 banks of 64 frames each (from the CC0 WaveEdit Online
+collection, listed in [assets/wavetables/README.md](assets/wavetables/README.md)), with
+anti-aliased mip levels. Each oscillator also has a **Mod Quantize** setting that snaps its pitch
+modulation to a scale, for sequenced and sample-and-hold pitch lines that stay in key.
+
+### Filter and envelopes
+
+A per-voice resonant filter with low-pass, band-pass and high-pass modes, envelope amount and
+audio-rate **Filter FM** from Osc 1, Osc 2 or their mix. The ADSR envelope has Default/Quick
+attack and Default/Percussive decay and release curves, and a retrigger switch. A Velocity
+Targets page sets how velocity reaches the VCA, the filter, envelope depth and envelope time.
+
+### Modulation
+
+- **Two LFOs** with nine shapes (Triangle, Saw, Square, an editable eight-point Shaper curve,
+  Sine, S&H, Slew S&H, ExpSaw, ExpRamp), tempo sync over 27 divisions, and Free, Poly, Mono,
+  Legato and One-shot retrigger modes. Synced LFOs follow Move's transport.
+- **Cycling Envelope**, a looping Rise/Hold/Fall generator with Env, Run and Loop modes.
+- **Modulation matrix** of twelve destination columns fed by seven sources: Cycling Envelope,
+  Envelope, LFO 1, LFO 2, Velocity + Aftertouch, Wheel and Key Track. A matrix cell can itself be
+  a destination, so one source can scale another's depth.
+- **Four macros**, each driving up to four destinations with its own amounts.
+
+### Effects
+
+Three stereo slots in series. Each slot picks a type and then a preset for that type:
+
+| Type | Presets |
+|---|---|
+| Delay | Digital, Stereo, Ping-Pong, Mono, Filtered, Filtered Ping-Pong, Tape, each also as a tempo-synced version |
+| Reverb | Default, Long, Hall, Echoes, Room, Dark Room |
+| Chorus | Default, Lush, Dark, Shaded, Single |
+| Phaser | Default, Space, SnH, each free or synced |
+| Flanger | Default, Silly, each free or synced |
+| Super Unison | Classic, Ravey, Soli, Slow, Slow Trig, Wide Trig, Mono Trig, Wavy |
+| Drive | Classic, Soft Clip, Germanium, Dual Fold, Climb, Tape |
+| Crusher, 3-Band EQ, Peak EQ, Multi Comp | Bit crushing, a three-band EQ, a parametric peak and a three-band compressor |
+
+### Voices and playing
+
+Six-voice polyphony, plus Mono and Unison modes (mono or poly stacks with spread) and a
+keyboard **Chord** mode that plays up to five intervals from one key. Bizar responds to
+velocity, pitch bend, channel pressure, polyphonic aftertouch, the mod wheel and the sustain
+pedal.
+
+### Sequencer and arpeggiator
+
+Both are clocked from Move's tempo and start when you hold keys:
+
+- **Seq** plays a pattern of up to 64 steps with up to six notes per step, transposed by the
+  last key held.
+- **Arp** plays the held keys Up, Down, Up/Down, Random, in played order, as a chord or Poly,
+  over one to four octaves.
+
+Rate is a 15-entry division list with gate and swing. Up to four automation lanes each aim at a
+modulation destination and hold one value per step, stepped or smoothed. The sequence is edited
+in the Remote UI and saved with the patch.
+
+### Presets
+
+128 original presets, sixteen in each of eight categories. Each name starts with a two-letter
+tag so the list is easy to browse on Move's display:
 
 | Tag | Category | Tag | Category |
 |---|---|---|---|
@@ -66,244 +133,115 @@ Move's small display:
 | `KY` | Keys | `AR` | Arpeggios and sequences |
 | `PY` | Polysynths and brass | `FX` | Effects, drones and percussion |
 
-`PY Init` is a plain saw starting point. The full list is in
-[docs/PRESETS.md](docs/PRESETS.md).
+Every preset shares the same two macros, so the whole bank plays the same way: **Macro 1,
+Timbre** opens the filter and moves the engines' signature controls with it, and **Macro 2,
+Space** raises the delay, reverb and release. Presets built on an LFO add **Macro 3, Motion**,
+the LFO's depth. The macros start at zero, where the preset sounds as designed. `PY Init` is a
+plain saw to start from.
 
-Every preset has the same two macros, so they play the same way across the
-bank. Each one moves several controls at once:
+## On Move
 
-| Macro | Name | What it moves |
-|---|---|---|
-| 1 | Timbre | Opens the filter (where it has room) and moves the engines' signature controls with it: supersaw detune and stack, FM index, fold, wavetable position, sync, formant… plus the drive |
-| 2 | Space | Reverb and delay amount, length and feedback, and a longer release |
+Bizar's parameter pages, in order: Main (macros, output, cutoff, resonance, attack and release),
+Factory Patches, Oscillator 1, Oscillator 2, Filter, Envelope, Velocity Targets, Cycling
+Envelope, LFO 1 and LFO 2 (each with a Curve page for the Shaper), Mod Matrix, Matrix Editor,
+Macros and the four Macro Slots pages, Effect 1 to 3, Voice, Chord and Settings. Each page shows
+up to eight knobs; controls that only apply to the current engine or effect are hidden until it
+is selected. [PARAMETER_REFERENCE.md](PARAMETER_REFERENCE.md) lists every page with its ranges
+and defaults.
 
-Presets built on an LFO (wobbles, gates, pumps and the riser) add **Macro 3,
-Motion**: the knob is the LFO's depth. The macros start at 0, where the preset
-sounds as designed.
+Patches are saved and automated through Schwung like any other module. The **Remote UI**, served
+by Schwung in a browser, adds what a small screen cannot: knobs for everything, draggable
+envelope and Shaper curves, a filter response view, waveform previews, the full modulation
+matrix with hardware-style mod assign, the sequencer editor, undo and redo, user patches with
+favourites, A/B compare, patch export and import, and share links that carry the patch in the
+URL.
 
-The bank is defined in `scripts/generate_factory_bank.py`, which the build
-turns into a C header. To change or add a preset, edit that script. Levels
-are evened out with `tools/measure_factory_levels.c`, which plays every preset
-and prints its RMS and peak level; the script's `LEVELS` table holds the trims.
-`tools/render_factory_preset.c` writes presets to WAV files (basses play a
-short riff, the rest a held note or chord) so a change can be auditioned
-before it goes on Move.
+## Playing in the browser
 
-## Sequencer and arpeggiator
+<https://klaine.github.io/bizar/> is the whole synth as a single page: the Remote UI plus the
+same DSP compiled to WebAssembly. Click **Start Bizar**, then play from a WebMIDI device (Chrome
+or Edge; Firefox needs a MIDI add-on), from the computer keyboard in Live's layout (A to K are
+the white keys, W E T Y U O P the black ones, Z and X shift octaves, C and V velocity), or from
+the on-screen keyboard. A BPM box drives the synced LFOs and the sequencer, the MIDI menu picks
+the input and channel and can follow MIDI clock, and Alt-click (or L) on a knob learns a MIDI
+controller. Your sound is kept in the browser and restored on the next visit.
 
-A step sequencer and an arpeggiator are built in, clocked from Move's tempo
-like the synced LFOs. Holding keys starts them:
+## Building from source
 
-- **Seq** plays a pattern of up to 64 steps, with up to six notes per step,
-  transposed by the last key held (relative to middle C).
-- **Arp** arpeggiates the held keys: Up, Down, Up/Down, Random, Played,
-  Chord or Poly, over one to four octaves.
-
-Rate is a 15-entry division list, with gate and swing. Up to four step
-automation lanes each point at a modulation destination and hold one offset
-per step; a smooth lane glides between steps and a stepped lane holds each
-value. Lanes play in Seq mode.
-
-The sequencer is edited in the Remote UI. Its settings (`seq_mode`,
-`seq_arp_mode`, `seq_arp_oct`, `seq_div`, `seq_gate`, `seq_swing`,
-`seq_length`, `seq_data`, and `seq_lane1..4_dest`, `_smooth` and `_data`) are
-saved with the patch but are not on Move's own parameter pages.
-
-## Browser build
-
-**Try it live: <https://klaine.github.io/bizar/>** (the single-file build, served from the `pages` branch).
-
-`sh scripts/build.sh --web` writes `dist/bizar-web.html`, a single
-self-contained file with the Remote UI and the same DSP compiled to
-WebAssembly. It needs [zig](https://ziglang.org/), and a normal
-`scripts/build.sh` run first to create the generated headers.
-
-Serve it over https (or from localhost), or open it from disk. Click **Start
-audio**, then play from a WebMIDI device (Chrome or Edge; Firefox needs its
-MIDI add-on), the computer keyboard in Live's layout (A–K white keys,
-W E T Y U O P black keys, Z/X octave, C/V velocity), or the on-screen
-**⌨ Keys** panel. A BPM box drives the synced LFOs and the sequencer; the
-**MIDI** menu picks the input and channel and can follow MIDI clock;
-Alt-click (or L) on a knob learns a MIDI controller. Your sound is saved in
-the browser and restored on the next visit.
-
-The Remote UI, in the browser build and on Move, has undo/redo, saved user
-patches, A/B compare, patch export and import, share links (the patch travels
-in the link's `#p=` fragment) and a patch browser with favourites.
-
-## Building
-
-The module targets Schwung's API-v2 sound-generator ABI and Move's aarch64
-Linux.
-
-On Linux or macOS with an AArch64 cross compiler (`aarch64-linux-gnu-gcc`,
-or set `CC`), or with [zig](https://ziglang.org/), which the script falls
-back to as `zig cc` when no cross compiler is found:
+Requirements: a POSIX shell, Python 3, and for the device build either an AArch64 cross
+compiler (`aarch64-linux-gnu-gcc`, or set `CC`) or [zig](https://ziglang.org/), which the
+build falls back to as `zig cc`. The web build needs zig.
 
 ```bash
 sh scripts/build.sh
 ```
 
-With Docker:
+This writes `dist/bizar/` (the module directory), `dist/bizar-module.tar.gz`, the same bytes as
+`dist/bizar-module-<version>.tar.gz`, and `dist/bizar-web.html` when zig is available.
+
+Other targets:
 
 ```bash
-docker build -f scripts/Dockerfile -t bizar-builder .
+CC=cc sh scripts/build.sh --test        # desktop DSP and integration tests
+sh scripts/build.sh --reference         # regenerate PARAMETER_REFERENCE.md and docs/PRESETS.md
+sh scripts/build.sh --web               # browser build only
+sh scripts/deploy.sh                    # install the build on a Move over SSH
 ```
 
-```bash
-docker run --rm -v "$PWD:/work" -w /work bizar-builder
-```
+Without a local toolchain, `scripts/Dockerfile` builds a container with everything needed, and
+`scripts/build-windows.ps1` runs the same build from PowerShell with Docker Desktop.
+`scripts/install-windows.ps1` installs the result on a Move from Windows.
 
-On Windows, start Docker Desktop with its Linux engine, then run from
-PowerShell in the project folder:
+The parameter reference and preset list are generated from the module's own contract, and CI
+fails if the committed copies are stale, so they cannot drift from the code. See
+[CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1
-```
+### Using your own MiniFreak presets
 
-This builds the container toolchain, runs the tests, cross-builds the module
-and writes the tarballs under `dist\`.
-
-Build output:
-
-- `dist/bizar/` — the module directory (`dsp.so`, `module.json`, the Remote
-  UI and the docs)
-- `dist/bizar-module.tar.gz` — the canonical package name, which the module
-  catalog's `asset_name` expects
-- `dist/bizar-module-<version>.tar.gz` — the same bytes under the version from
-  `module.json`
-- `dist/bizar-web.html` — the browser build, when `zig` is on `PATH`
-
-### Tests and generated docs
-
-Run the desktop DSP and integration tests with a native compiler:
-
-```bash
-CC=cc sh scripts/build.sh --test
-```
-
-Regenerate `PARAMETER_REFERENCE.md` and `docs/PRESETS.md`:
-
-```bash
-sh scripts/build.sh --reference
-```
-
-The parameter reference comes from the module's own `ui_hierarchy` and
-`chain_params`, so it cannot drift from the code. CI regenerates both
-documents and fails if the checked-in copies are stale.
-
-## Installing on Move
-
-Install the tarball with Schwung Manager, or extract the module directory
-into `/data/UserData/schwung/modules/sound_generators/bizar/` on the Move,
-then rescan modules or restart Schwung. Bizar appears under Sound Generators.
-
-From Windows, with OpenSSH and a root SSH key added through Move's
-`http://move.local/development/ssh` page:
-
-```powershell
-ssh-keygen -t rsa -b 3072 -C "bizar-move" -f "$HOME\.ssh\bizar_move_rsa"
-(Get-Content "$HOME\.ssh\bizar_move_rsa.pub" -Raw).Trim() | Set-Clipboard
-# Paste the key into Development > SSH Keys in Move Manager and confirm on Move, then:
-powershell -ExecutionPolicy Bypass -File scripts/install-windows.ps1 `
-  -MoveHost move.local -SshKeyPath "$HOME\.ssh\bizar_move_rsa"
-```
-
-## Using your own MiniFreak presets
-
-If you own a MiniFreak or MiniFreak V, you can compile an exported preset bank
-into a personal build of Bizar:
+If you own a MiniFreak, you can compile an exported `.mnfx` bank into a personal build:
 
 ```bash
 MINIFREAK_BANK=private/MyBank.mnfx sh scripts/build.sh
 ```
 
-The import is off unless you ask for it, and a build with it is written as
-`dist/bizar-module-personal.tar.gz` so it is never mistaken for a release.
-Do not publish such a build. Export steps, the Windows option, what is
-imported and the known gaps are in
-[docs/MINIFREAK_IMPORT.md](docs/MINIFREAK_IMPORT.md).
+Such a build is written as `dist/bizar-module-personal.tar.gz` and must not be shared or
+published. [docs/MINIFREAK_IMPORT.md](docs/MINIFREAK_IMPORT.md) has the export steps and what
+the importer covers.
 
-## Releasing
+## Status
 
-`module.json` is the single source of truth for the version. Bump its
-`"version"`, rebuild from a clean checkout without `MINIFREAK_BANK`, and the
-packaging step writes both tarballs. Keep the archive's top-level directory
-named `bizar` so it extracts to a folder that matches the module id, as the
-catalog installer requires.
+Bizar is a beta. Known gaps:
 
-Publishing through Schwung Manager also needs:
+- The **Sample, Particles, Cloud Grains, Hit Grains, Frozen, Skan, Lick, Raster** and
+  **Audio In** engine types load and respond to their knobs but play a placeholder tone. They
+  need an asset-loading and audio-input model that keeps file I/O off the audio thread.
+- No vocoder effect and no user wavetable import.
+- **Modal** is struck only; a sustained, dust-excited mode is not wired up.
+- The three effect slots always run in series. There is no per-slot send routing.
 
-1. A `release.json` on the default branch with the current `version` and a
-   `download_url` pointing at the tagged tarball, for example
-   `releases/download/v0.8.0/bizar-module.tar.gz`.
-2. A module catalog entry with `id` (`bizar`), `name`, `description`,
-   `author`, `component_type` (`sound_generator`), `github_repo`,
-   `default_branch`, `asset_name` (`bizar-module.tar.gz`) and
-   `min_host_version`.
-
-## Status and known limitations
-
-Bizar is a beta at version 0.8.0. It passes the desktop DSP and integration
-tests and cross-compiles for Move; a sustained six-voice run with all effects
-on Move hardware has not been recorded for this revision.
-
-- **Sample and granular engines.** Sample, Particles, Cloud Grains, Hit Grains,
-  Frozen, Skan, Lick and Raster load and respond to their controls, but each
-  plays a shared placeholder tone. They need an asset-loading model that keeps
-  file I/O and allocation off the render path. **Audio In** is a placeholder
-  too, because the module declares no `audio_in` capability.
-- **Vocoder effects and user wavetable import** are not implemented.
-- **Modal** is Plaits' modal resonator with 12 modes and a fixed accent. It is
-  struck only; the sustained (dust-excited) mode is not wired up.
-- **Effect routing.** The three slots always run in series, FX1 → FX2 → FX3;
-  per-slot send/insert routing is not implemented.
-- **Move hardware validation.** The parameter pages, the two-page modulation
-  matrix and the Remote UI have been exercised on desktop and in automated
-  tests, but not yet on a device for this revision.
-- **Device profiling** — CPU and memory headroom at full polyphony with every
-  effect on — is still outstanding.
-
-Changes are recorded in [CHANGELOG.md](CHANGELOG.md).
+Bug reports and ideas are welcome as [issues](https://github.com/klaine/bizar/issues).
 
 ## Project layout
 
 | Path | Contents |
 |---|---|
-| `src/bizar.c` | Plugin adapter: parameters, state, presets, voice allocation and rendering |
-| `src/engines.c`, `effects.c`, `filter.c`, `modulation.c`, `voice.c`, `sequencer.c` | Allocation-free DSP units |
-| `scripts/generate_factory_bank.py` | The 128 factory presets |
-| `scripts/generate_minifreak_bank.py` | Optional MiniFreak bank importer (personal builds) |
+| `src/bizar.c` | Plugin adapter: parameters, pages, state, presets, voice allocation and rendering |
+| `src/engines.c`, `effects.c`, `filter.c`, `modulation.c`, `voice.c`, `sequencer.c` | Allocation-free DSP |
+| `scripts/generate_factory_bank.py` | The 128 factory presets, compiled into the module at build time |
 | `scripts/generate_wavetables.py` | Converts the CC0 wavetables into mip levels |
-| `scripts/build.sh` | Build, test, reference and web targets |
-| `web_ui.html`, `web_ui_extras.js` | Remote UI (the extras are inlined by `scripts/inline_extras.py`) |
+| `web_ui.html`, `web_ui_extras.js` | Remote UI |
 | `web/` | Browser build: WebAssembly glue, host shim and bundler |
 | `tests/test_plugin.c` | Desktop DSP and integration tests |
-| `tools/` | Contract dump, factory level meter and renderer, wavetable matching helper |
+| `tools/` | Contract dump, factory level meter and preset renderer |
 | `include/` | Schwung ABI declarations, so the module builds without a Schwung checkout |
 
-## Implementation notes
-
-- The module reads no files and does no heap allocation in its plugin
-  callbacks. It uses a fixed pool of eight instances and clears delay memory
-  incrementally, a bounded amount per render block.
-- Audio is rendered at 44.1 kHz in stereo int16 blocks. The delay buffer holds
-  about 2.97 seconds so Sync presets reach a whole note at common tempos.
-  Effects stay bypassed until their buffers are cleared; the reverb clears its
-  own region whenever its slot changes effect type, so a delay tail is never
-  read back as a room.
-- Engine and effect order is part of the patch format, so new engines are
-  appended and existing indices never move. Older saved states are migrated
-  on load; each state version change is explained in `src/bizar.c`.
-- Envelope decay and release times are times to −60 dB, so they read longer
-  than on synths that quote a time constant.
-- Voices are summed with a fixed per-voice gain and a cubic soft clipper on
-  the master, without renormalising for the number of active voices, so a held
-  note does not duck when another one starts.
+The module does no file I/O and no heap allocation in its audio callbacks. Engine and effect
+indices are part of the patch format, so new ones are appended and older patches are migrated on
+load.
 
 ## License
 
-Bizar is released under the MIT License; see `LICENSE`. Parts of the engines
-are adapted from Plaits (MIT); see `THIRD_PARTY_NOTICES.md`. The built-in
-WaveEdit Online wavetables are CC0 1.0; see `assets/wavetables/README.md`.
-Schwung and Ableton Move are separate projects under their own licenses.
+MIT, see [LICENSE](LICENSE). Parts of the engines are adapted from Plaits (MIT) and the built-in
+wavetables are CC0 1.0; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and
+[assets/wavetables/README.md](assets/wavetables/README.md). Schwung and Ableton Move are
+separate projects under their own licenses.

@@ -2914,6 +2914,73 @@ static void test_harmo_weight_cache(void) {
     }
 }
 
+/* One delay-line engine's state, so a cached and an uncached copy can run
+ * side by side. */
+typedef struct {
+    float delay[SF_VOICE_DELAY];
+    unsigned pos, excite;
+    float low, noise, dc;
+    uint32_t rng;
+} delay_engine_state_t;
+
+static sf_engine_voice_t delay_engine_voice(delay_engine_state_t *state) {
+    sf_engine_voice_t voice;
+    memset(&voice, 0, sizeof(voice));
+    voice.delay_buf = state->delay;
+    voice.delay_pos = &state->pos;
+    voice.delay_low = &state->low;
+    voice.excitation_left = &state->excite;
+    voice.noise_state = &state->noise;
+    voice.formant_dc = &state->dc;
+    voice.rng = &state->rng;
+    voice.gate = 1;
+    return voice;
+}
+
+/* The Karplus and Comb coefficient caches must sound exactly like working
+ * the coefficients out every sample: knobs held, then ramped, the pitch held,
+ * then moving every sample (vibrato), through a strike and the bow. */
+static void test_delay_engine_caches(void) {
+    static delay_engine_state_t cached_state, plain_state;
+    for (int engine = 0; engine < 2; ++engine) {
+        memset(&cached_state, 0, sizeof(cached_state));
+        memset(&plain_state, 0, sizeof(plain_state));
+        cached_state.rng = plain_state.rng = 0x12345678u;
+        sf_karplus_cache_t karplus;
+        sf_comb_cache_t comb;
+        memset(&karplus, 0, sizeof(karplus));
+        memset(&comb, 0, sizeof(comb));
+        sf_engine_voice_t cached = delay_engine_voice(&cached_state);
+        sf_engine_voice_t plain = delay_engine_voice(&plain_state);
+        cached.karplus_cache = &karplus;
+        cached.comb_cache = &comb;
+        float phase = 0.0f;
+        for (int s = 0; s < 30000; ++s) {
+            if (s == 0 || s == 15000) cached_state.excite = plain_state.excite = 300u;
+            float increment = 220.0f / 44100.0f;
+            if (s >= 10000 && s < 20000) increment *= 1.0f + 0.01f * sinf((float)s * 0.001f);
+            float wave = (float)((s / 700) % 5) / 4.0f;
+            float timbre = s % 4000 < 2000 ? 0.3f : 0.3f + (float)(s % 2000) / 2000.0f * 0.5f;
+            float shape = s < 25000 ? 0.7f : 0.2f;
+            cached.phase = plain.phase = phase;
+            cached.increment = plain.increment = increment;
+            if (engine == 0) {
+                sf_engine_params_t params = {OSC_KARPLUS, wave, timbre, shape, 0};
+                assert(sf_engine1_sample(&params, &cached, &cached)
+                       == sf_engine1_sample(&params, &plain, &plain));
+            } else {
+                sf_engine_params_t params = {ENGINE_COMB, wave, timbre, shape, 0};
+                float input = 0.9f * sf_mod_triangle(phase);
+                assert(sf_engine2_mix(&params, &cached, &cached, input, 1.0f, 1.0f, NULL)
+                       == sf_engine2_mix(&params, &plain, &plain, input, 1.0f, 1.0f, NULL));
+            }
+            phase += increment;
+            if (phase >= 1.0f) phase -= 1.0f;
+        }
+        assert(karplus.valid == (engine == 0) && comb.valid == (engine == 1));
+    }
+}
+
 /* A new note only marks the delay lines stale; each is cleared just before
  * an engine that uses it runs, and a legato note keeps what is in them. */
 static void test_delay_lines_cleared_on_use(void) {
@@ -2987,6 +3054,7 @@ int main(void) {
     test_wavetable_phase_wraps();
     test_seq_note_overflow();
     test_harmo_weight_cache();
+    test_delay_engine_caches();
     test_delay_lines_cleared_on_use();
     puts("Bizar plugin tests passed");
     return 0;

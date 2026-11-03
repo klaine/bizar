@@ -54,6 +54,12 @@
   line per voice unless Karplus or the Comb Filter is about to use it, which
   makes a six-note chord's note-ons about 9x cheaper. The sound is unchanged,
   bit for bit.
+- **Karplus Strong and the Comb Filter take far less CPU.** Both worked out
+  their loop and filter coefficients on every sample; they now keep them while
+  the knobs and the pitch hold still, and the Comb skips its limiter's roots
+  below the knee. Six voices of Karplus render about 38% faster (18% under
+  vibrato) and of the Comb about 48% (43%). The sound is unchanged, bit for
+  bit.
 - **Lighter on the CPU.** A state load is about 7x faster and a preset load 3.5x (one indexed
   pass over the patch instead of a scan per key), and Chorus, Flanger, Phaser,
   Super Unison, Crusher and Reverb do less per-sample maths; the sound is the same

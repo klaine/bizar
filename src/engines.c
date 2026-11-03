@@ -1412,87 +1412,112 @@ static float karplus_burst(unsigned n) {
     return (float)(x >> 8) * (1.0f / 8388607.5f) - 1.0f;
 }
 
+/* The excitation lowpass's coefficient for a cutoff. */
+static float karplus_exc_alpha(float exc_cutoff) {
+    exc_cutoff = sf_clampf(exc_cutoff, 80.0f, 0.45f * SF_SAMPLE_RATE);
+    return 2.0f * SF_PI * exc_cutoff / (SF_SAMPLE_RATE + 2.0f * SF_PI * exc_cutoff);
+}
+
 static float karplus_sample(const sf_engine_params_t *params,
                             const sf_engine_voice_t *voice) {
     if (!voice->delay_buf || !voice->delay_pos || !voice->delay_low
         || !voice->excitation_left) return 0.0f;
     unsigned size = (unsigned)SF_VOICE_DELAY;
-    float f0 = sf_clampf(voice->increment, 20.0f / SF_SAMPLE_RATE, 0.25f);
-    float base_hz = f0 * SF_SAMPLE_RATE;
-    float delay_f = sf_clampf(1.0f / f0, 4.0f, (float)size - 4.0f);
+    /* The coefficients only move with the knobs and the pitch, so they are
+     * worked out when those change (see sf_karplus_cache_t). */
+    sf_karplus_cache_t local, *c = voice->karplus_cache;
+    if (!c) {
+        local = (sf_karplus_cache_t){0};
+        c = &local;
+    }
+    int knobs = !c->valid || c->wave != params->wave || c->timbre != params->timbre
+             || c->shape != params->shape;
+    if (knobs) {
+        c->wave = params->wave;
+        c->timbre = params->timbre;
+        c->shape = params->shape;
+        float bow = sf_clampf(params->wave, 0.0f, 1.0f);
+        float position = sf_clampf(params->timbre, 0.0f, 1.0f);
+        float decay = sf_clampf(params->shape, 0.0f, 1.0f);
+        /* Loop lowpass, high above the note: the extra top-end loss. */
+        c->lp_mult = engine_exp2f((SF_KP_LP_C0 + SF_KP_LP_C1 * decay) / 12.0f);
+        /* Loop gain: the measured loss per period, less what the lowpass
+         * already takes from the fundamental (at the pitch level). */
+        float di = decay * 10.0f;
+        int i = (int)di;
+        if (i > 9) i = 9;
+        c->loss_table = g_karplus_loss_db[i]
+                      + (g_karplus_loss_db[i + 1] - g_karplus_loss_db[i]) * (di - (float)i);
+        c->fraction = SF_KP_POS0 * engine_exp2f(-(position - 0.25f) * SF_KP_POS_OCT);
+        c->alpha_bow = karplus_exc_alpha(SF_KP_BOW_LP * engine_exp2f(bow * SF_KP_BOW_LP_OCT));
+        c->bow = bow;
+        c->bow_q = sqrtf(sqrtf(bow));   /* times bow: bow^1.25 */
+        c->bow_x = engine_exp2f(decay * SF_KP_BOW_DECAY_DB * 0.16609640f);
+    }
+    if (knobs || c->increment != voice->increment) {
+        c->increment = voice->increment;
+        float f0 = sf_clampf(voice->increment, 20.0f / SF_SAMPLE_RATE, 0.25f);
+        float base_hz = f0 * SF_SAMPLE_RATE;
+        float delay_f = sf_clampf(1.0f / f0, 4.0f, (float)size - 4.0f);
+        float loop_cutoff = sf_clampf(base_hz * c->lp_mult, 40.0f, 0.49f * SF_SAMPLE_RATE);
+        float loop_alpha = sf_clampf(
+            2.0f * SF_PI * loop_cutoff / (SF_SAMPLE_RATE + 2.0f * SF_PI * loop_cutoff),
+            0.001f, 0.995f);
+        float phase_delay = (1.0f - loop_alpha) / fmaxf(loop_alpha, 0.05f);
+        if (phase_delay > 2.0f) phase_delay = 2.0f;
+        float loss_db = fminf(c->loss_table, SF_KP_MAX_DB_S / base_hz);
+        float ratio = base_hz / loop_cutoff;
+        float lp_gain = 1.0f / sqrtf(1.0f + ratio * ratio);
+        unsigned tap = (unsigned)(delay_f * c->fraction + 0.5f);
+        c->f0 = f0;
+        c->inv_f0 = 1.0f / f0;
+        c->hp = f0 * SF_KP_HP_HARM * 2.0f * SF_PI;
+        c->loop_alpha = loop_alpha;
+        c->tuned_delay = sf_clampf(delay_f - phase_delay, 4.0f, (float)size - 4.0f);
+        c->loop_gain = sf_clampf(engine_exp2f(-loss_db * 0.16609640f) / lp_gain, 0.0f, 0.99999f);
+        c->tap = tap < 1u ? 1u : tap;
+        c->alpha_strike = karplus_exc_alpha(base_hz * SF_KP_EXC_HARM * SF_KP_POS0 * 1.41421356f
+                                            / c->fraction);
+    }
+    c->valid = 1;
+
     unsigned pos = *voice->delay_pos & (size - 1u);
-
-    float bow = sf_clampf(params->wave, 0.0f, 1.0f);
-    float position = sf_clampf(params->timbre, 0.0f, 1.0f);
-    float decay = sf_clampf(params->shape, 0.0f, 1.0f);
-
-    /* Loop lowpass, high above the note: the extra top-end loss. */
-    float loop_cutoff = sf_clampf(
-        base_hz * engine_exp2f((SF_KP_LP_C0 + SF_KP_LP_C1 * decay) / 12.0f),
-        40.0f, 0.49f * SF_SAMPLE_RATE);
-    float loop_alpha = sf_clampf(
-        2.0f * SF_PI * loop_cutoff / (SF_SAMPLE_RATE + 2.0f * SF_PI * loop_cutoff),
-        0.001f, 0.995f);
-    float phase_delay = (1.0f - loop_alpha) / fmaxf(loop_alpha, 0.05f);
-    if (phase_delay > 2.0f) phase_delay = 2.0f;
-    float tuned_delay = sf_clampf(delay_f - phase_delay, 4.0f, (float)size - 4.0f);
-    float delayed = plaits_delay_read_hermite(voice->delay_buf, size, pos, tuned_delay);
-
-    /* Loop gain: the measured loss per period, less what the lowpass already
-     * takes from the fundamental. */
-    float di = decay * 10.0f;
-    int i = (int)di;
-    if (i > 9) i = 9;
-    float loss_db = g_karplus_loss_db[i]
-                  + (g_karplus_loss_db[i + 1] - g_karplus_loss_db[i]) * (di - (float)i);
-    loss_db = fminf(loss_db, SF_KP_MAX_DB_S / base_hz);
-    float ratio = base_hz / loop_cutoff;
-    float lp_gain = 1.0f / sqrtf(1.0f + ratio * ratio);
-    float loop_gain = sf_clampf(
-        engine_exp2f(-loss_db * 0.16609640f) / lp_gain, 0.0f, 0.99999f);
+    float delayed = plaits_delay_read_hermite(voice->delay_buf, size, pos, c->tuned_delay);
 
     /* Excitation: the strike burst, then the bow's noise, through one
      * lowpass (the strike's while it lasts, then the bow's) and a highpass
      * under the note that keeps the bow from rumbling at DC. */
     float raw = 0.0f;
-    float fraction = SF_KP_POS0 * engine_exp2f(-(position - 0.25f) * SF_KP_POS_OCT);
-    float exc_cutoff = base_hz * SF_KP_EXC_HARM * SF_KP_POS0 * 1.41421356f / fraction;
+    float exc_alpha = c->alpha_bow;
     if (*voice->excitation_left > 0) {
         /* Strike: a comb at the strike position, which slides its first peak
          * from the 2nd partial at Position 0 toward the 11th at 1; the strike
          * lowpass opens with it so the strike keeps its level. */
         unsigned n = *voice->excitation_left;
-        unsigned tap = (unsigned)(delay_f * fraction + 0.5f);
-        if (tap < 1u) tap = 1u;
-        raw = (karplus_burst(n) - karplus_burst(n + tap)) * SF_KP_STRIKE;
+        raw = (karplus_burst(n) - karplus_burst(n + c->tap)) * SF_KP_STRIKE;
         --(*voice->excitation_left);
-    } else {
-        exc_cutoff = SF_KP_BOW_LP * engine_exp2f(bow * SF_KP_BOW_LP_OCT);
+        exc_alpha = c->alpha_strike;
     }
-    if (voice->rng && voice->gate && bow > 0.0f) {
+    if (voice->rng && voice->gate && c->bow > 0.0f) {
         /* Bow: a pulse once a period (flat harmonics of the same level at
          * any pitch) roughened with noise, so the string sustains a pitched
          * tone rather than a filtered hiss. */
-        float pulse = (voice->phase < f0 ? 1.0f / f0 : 0.0f) - 1.0f;
+        float pulse = (voice->phase < c->f0 ? c->inv_f0 : 0.0f) - 1.0f;
         raw += (pulse + SF_KP_BOW_NOISE * noise_sample(voice->rng))
-             * SF_KP_BOW_GAIN * bow * sqrtf(sqrtf(bow))   /* bow^1.25 */
-             * engine_exp2f(decay * SF_KP_BOW_DECAY_DB * 0.16609640f);
+             * SF_KP_BOW_GAIN * c->bow * c->bow_q * c->bow_x;
     }
     float excitation = 0.0f;
     if (voice->noise_state) {
-        exc_cutoff = sf_clampf(exc_cutoff, 80.0f, 0.45f * SF_SAMPLE_RATE);
-        float exc_alpha = 2.0f * SF_PI * exc_cutoff / (SF_SAMPLE_RATE + 2.0f * SF_PI * exc_cutoff);
         *voice->noise_state += exc_alpha * (raw - *voice->noise_state);
         excitation = *voice->noise_state;
         if (voice->formant_dc) {
-            *voice->formant_dc += f0 * SF_KP_HP_HARM * 2.0f * SF_PI
-                                * (excitation - *voice->formant_dc);
+            *voice->formant_dc += c->hp * (excitation - *voice->formant_dc);
             excitation -= *voice->formant_dc;
         }
     }
 
-    *voice->delay_low += loop_alpha * (delayed - *voice->delay_low);
-    float s = sf_clampf(excitation + *voice->delay_low * loop_gain, -4.0f, 4.0f);
+    *voice->delay_low += c->loop_alpha * (delayed - *voice->delay_low);
+    float s = sf_clampf(excitation + *voice->delay_low * c->loop_gain, -4.0f, 4.0f);
     voice->delay_buf[pos] = s;
     *voice->delay_pos = (pos + 1u) & (size - 1u);
     /* Soft saturation caps a hard-bowed, long-decay string. */
@@ -2092,34 +2117,53 @@ static float comb_process(const sf_engine_voice_t *voice,
                           const sf_engine_params_t *params, float input) {
     if (!voice->delay_buf || !voice->delay_pos || !voice->delay_low) return input;
     unsigned size = (unsigned)SF_VOICE_DELAY;
+    /* The coefficients only move with the knobs and the pitch, so they are
+     * worked out when those change (see sf_comb_cache_t). */
+    sf_comb_cache_t local, *c = voice->comb_cache;
+    if (!c) {
+        local = (sf_comb_cache_t){0};
+        c = &local;
+    }
+    int knobs = !c->valid || c->wave != params->wave || c->timbre != params->timbre
+             || c->shape != params->shape;
+    if (knobs) {
+        c->wave = params->wave;
+        c->timbre = params->timbre;
+        c->shape = params->shape;
+        float w = sf_clampf(params->wave, 0.0f, 1.0f) * 20.0f;
+        int wi = (int)w;
+        if (wi > 19) wi = 19;
+        c->ratio = g_comb_ratio[wi]
+                 * engine_exp2f((w - (float)wi) * log2f(g_comb_ratio[wi + 1] / g_comb_ratio[wi]));
 
-    float w = sf_clampf(params->wave, 0.0f, 1.0f) * 20.0f;
-    int wi = (int)w;
-    if (wi > 19) wi = 19;
-    float ratio = g_comb_ratio[wi]
-                * engine_exp2f((w - (float)wi) * log2f(g_comb_ratio[wi + 1] / g_comb_ratio[wi]));
+        float t = sf_clampf(params->timbre, 0.0f, 1.0f);
+        int ti = 0;
+        while (ti < SF_COMB_TIMBRE_POINTS - 2 && t > g_comb_timbre_x[ti + 1]) ++ti;
+        float tf = (t - g_comb_timbre_x[ti]) / (g_comb_timbre_x[ti + 1] - g_comb_timbre_x[ti]);
+        c->in_gain = g_comb_input_gain[ti] + (g_comb_input_gain[ti + 1] - g_comb_input_gain[ti]) * tf;
+        c->feedback = g_comb_feedback[ti] + (g_comb_feedback[ti + 1] - g_comb_feedback[ti]) * tf;
 
-    float t = sf_clampf(params->timbre, 0.0f, 1.0f);
-    int ti = 0;
-    while (ti < SF_COMB_TIMBRE_POINTS - 2 && t > g_comb_timbre_x[ti + 1]) ++ti;
-    float tf = (t - g_comb_timbre_x[ti]) / (g_comb_timbre_x[ti + 1] - g_comb_timbre_x[ti]);
-    float in_gain = g_comb_input_gain[ti] + (g_comb_input_gain[ti + 1] - g_comb_input_gain[ti]) * tf;
-    float feedback = g_comb_feedback[ti] + (g_comb_feedback[ti + 1] - g_comb_feedback[ti]) * tf;
+        float sh = sf_clampf(params->shape, 0.0f, 1.0f) * 4.0f;
+        int si = (int)sh;
+        if (si > 3) si = 3;
+        float damp_hz = g_comb_damp_hz[si]
+                      * engine_exp2f((sh - (float)si) * log2f(g_comb_damp_hz[si + 1] / g_comb_damp_hz[si]));
+        c->alpha = 1.0f - expf(-SF_TWO_PI * damp_hz / SF_SAMPLE_RATE);
+        /* The loop low-pass delays low frequencies by (1 - alpha) / alpha
+         * samples; take that off the line so the teeth land on the comb
+         * pitch. */
+        c->lag = (1.0f - c->alpha) / c->alpha;
+    }
+    if (knobs || c->increment != voice->increment) {
+        c->increment = voice->increment;
+        float hz = voice->increment * SF_SAMPLE_RATE * c->ratio;
+        float delay_f = SF_SAMPLE_RATE / (hz > 1.0f ? hz : 1.0f) - c->lag;
+        c->delay = sf_clampf(delay_f, 2.0f, (float)size - 2.0f);
+    }
+    c->valid = 1;
 
-    float sh = sf_clampf(params->shape, 0.0f, 1.0f) * 4.0f;
-    int si = (int)sh;
-    if (si > 3) si = 3;
-    float damp_hz = g_comb_damp_hz[si]
-                  * engine_exp2f((sh - (float)si) * log2f(g_comb_damp_hz[si + 1] / g_comb_damp_hz[si]));
-    float alpha = 1.0f - expf(-SF_TWO_PI * damp_hz / SF_SAMPLE_RATE);
-
-    /* The loop low-pass delays low frequencies by (1 - alpha) / alpha
-     * samples; take that off the line so the teeth land on the comb pitch. */
-    float hz = voice->increment * SF_SAMPLE_RATE * ratio;
-    float delay_f = SF_SAMPLE_RATE / (hz > 1.0f ? hz : 1.0f) - (1.0f - alpha) / alpha;
-    delay_f = sf_clampf(delay_f, 2.0f, (float)size - 2.0f);
     unsigned pos = *voice->delay_pos % size;
-    float read_f = (float)pos - delay_f;
+    float read_f = (float)pos - c->delay;
     if (read_f < 0.0f) read_f += (float)size;
     unsigned i0 = (unsigned)read_f;
     unsigned i1 = (i0 + 1u) % size;
@@ -2128,13 +2172,15 @@ static float comb_process(const sf_engine_voice_t *voice,
     float delayed = a + (voice->delay_buf[i1] - a) * frac;
 
     float low = *voice->delay_low;
-    low += alpha * (in_gain * input + feedback * delayed - low);
+    low += c->alpha * (c->in_gain * input + c->feedback * delayed - low);
     *voice->delay_low = low;
-    /* Hard-knee limiter, x / (1 + |x / L|^8)^(1/8). */
+    /* Hard-knee limiter, x / (1 + |x / L|^8)^(1/8). Below about L / 8 the sum
+     * rounds to exactly 1, and the three roots would return 1. */
     float u = low * (1.0f / SF_COMB_LIMIT);
     float u2 = u * u;
     float u4 = u2 * u2;
-    float out = low / sqrtf(sqrtf(sqrtf(1.0f + u4 * u4)));
+    float knee = 1.0f + u4 * u4;
+    float out = knee == 1.0f ? low : low / sqrtf(sqrtf(sqrtf(knee)));
     voice->delay_buf[pos] = out;
     *voice->delay_pos = (pos + 1u) % size;
     return out;

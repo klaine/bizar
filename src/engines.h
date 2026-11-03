@@ -172,6 +172,30 @@ typedef struct {
     float weights[SF_HARMO_PARTIALS];
 } sf_harmo_cache_t;
 
+/* Karplus Strong's and the Comb Filter's coefficients, kept per oscillator
+ * position in two levels: the knob level while Wave, Timbre and Shape hold
+ * still, and the pitch level (built from it) while the increment does too.
+ * Working them out every sample was most of both engines' cost. valid 0
+ * marks a cache empty. */
+typedef struct {
+    int valid;
+    float wave, timbre, shape, increment;
+    /* Knob level. */
+    float bow, bow_q, bow_x, lp_mult, loss_table, fraction, alpha_bow;
+    /* Pitch level. */
+    float f0, inv_f0, hp, loop_alpha, tuned_delay, loop_gain, alpha_strike;
+    unsigned tap;
+} sf_karplus_cache_t;
+
+typedef struct {
+    int valid;
+    float wave, timbre, shape, increment;
+    /* Knob level. */
+    float ratio, in_gain, feedback, alpha, lag;
+    /* Pitch level. */
+    float delay;
+} sf_comb_cache_t;
+
 typedef struct {
     float phase;
     float increment;
@@ -205,6 +229,9 @@ typedef struct {
     unsigned *sh_count;
     /* Harmo's weight cache; NULL rebuilds the weights every sample. */
     sf_harmo_cache_t *harmo_cache;
+    /* Karplus and Comb coefficient caches; NULL works them out every sample. */
+    sf_karplus_cache_t *karplus_cache;
+    sf_comb_cache_t *comb_cache;
 } sf_engine_voice_t;
 
 float sf_engine1_sample(const sf_engine_params_t *params,

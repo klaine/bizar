@@ -4203,7 +4203,8 @@ static void sf_render_block(void *instance, int16_t *out, int frames) {
                         .apf_fb = &voice->apf_fb,
                         .sh_hold = &voice->sh_hold,
                         .sh_count = &voice->sh_count,
-                        .harmo_cache = &voice->harmo1
+                        .harmo_cache = &voice->harmo1,
+                        .karplus_cache = &voice->karplus1
                     };
                     ctl->osc2 = (sf_engine_voice_t){
                         .rng = &voice->rng,
@@ -4226,7 +4227,9 @@ static void sf_render_block(void *instance, int16_t *out, int frames) {
                         .apf_fb = &voice->apf_fb,
                         .sh_hold = &voice->sh_hold,
                         .sh_count = &voice->sh_count,
-                        .harmo_cache = &voice->harmo2
+                        .harmo_cache = &voice->harmo2,
+                        .karplus_cache = &voice->karplus2,
+                        .comb_cache = &voice->comb2
                     };
                     ctl->valid = 1;
                     ctl->age = voice->age;

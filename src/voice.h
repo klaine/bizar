@@ -214,6 +214,11 @@ typedef struct {
     /* Harmo's partial weights, one per oscillator position. */
     sf_harmo_cache_t harmo1;
     sf_harmo_cache_t harmo2;
+    /* Karplus coefficients per position, and the Comb's (an Osc 2 processor
+     * only). */
+    sf_karplus_cache_t karplus1;
+    sf_karplus_cache_t karplus2;
+    sf_comb_cache_t comb2;
     /* Up to twelve all-pass stages for the Phaser Filter, plus its feedback memory,
      * which is an Osc 2 processor only. */
     float apf[SF_PHASER_MAX_STAGES];

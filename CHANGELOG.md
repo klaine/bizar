@@ -2,6 +2,39 @@
 
 ## Unreleased: Bizar
 
+- **Every engine takes less CPU, most of them 20-50% less.** Each engine now
+  keeps the coefficients it works out from its knobs and the pitch, and
+  rebuilds them only when those change, as Harmo, Karplus and the Comb already
+  did. Some also skip work they never needed:
+  - SuperWave's saw and square no longer compute unused polyBLEPs.
+  - Chords skips silent voices.
+  - Noise only renders the tones it blends.
+  - Modal runs its resonators four at a time.
+
+  The clamp helper every engine calls is now two comparisons instead of about
+  twenty instructions. A six-voice BasicWaves patch renders about 18% faster.
+  Noise, Chords, V.Analog and Modal take about half the time they did. The
+  sound is unchanged bit for bit, apart from the fixes below.
+- **Knobs now land exactly on their value.** The smoothing used to stop a
+  float step short of the target, or creep towards 0 for about a second, which
+  kept the new caches from settling. The difference is at most 1 LSB of the
+  output.
+- **Fixed: Osc 2's Wavefolder clipped instead of folding at high drive.** The
+  folder only reflected four times, which covers a drive of 9; Osc 2 reaches
+  about 19. It now folds at any drive. Bass at its extreme settings folded the
+  same way and is fixed too.
+- **Fixed: Speech's word mode ignored Timbre for its vowels.** Timbre set the
+  word's length for its level but not for its vowel walk. The two now stretch
+  together; Timbre 0.4 to 0.6 is unchanged.
+- **Fixed: the top of Speech's Shape range stood still.** With the sustained
+  voices, positions 4 to 5 now blend the last phoneme back into the first
+  instead of holding it. PY Vowel Choir, PD Breathing Choir and FX Robot Voice
+  sound slightly different.
+- **Fixed: Harm went silent on very high notes above Wave 0.5.** Its first
+  partial was checked against Nyquist at the wrong ratio, which muted notes
+  above about 10 kHz.
+- **Fixed: the Audio In stand-in's metallic noise clicked on every cycle of
+  the note.** It now runs on a phase of its own.
 - **Fixed: Mono with Env Reset cut the held note dead and never glided.** A
   legato note now fades the sounding one out over 3 ms, as a voice steal does,
   then restarts the envelope from zero, and its pitch glides from the old note

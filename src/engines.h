@@ -196,6 +196,260 @@ typedef struct {
     float delay;
 } sf_comb_cache_t;
 
+/* The Noise engine's coefficients, kept while Wave, Timbre and Shape hold
+ * still: the dust filters and level, the metal bank's increments and gains
+ * and the tone level took 5 exp2s, 2 expf, a powf, 3 square roots and
+ * several divisions every sample. valid 0 marks it empty. */
+typedef struct {
+    int valid;
+    float wave, timbre, shape;
+    int dust_on, metal_on;
+    float dust_fade, al, ah, hp0, mix, density, gain;
+    float metal_mix, metal_level, metal_inc[6], metal_g[6];
+    float balance, tone_gain, tone_level;
+} sf_noise_cache_t;
+
+/* Two Op FM's ratio, index and feedback, kept while Wave, Timbre and Shape
+ * hold still. */
+typedef struct {
+    int valid;
+    float wave, timbre, shape;
+    float ratio, amount, feedback, fb2;
+} sf_fm_cache_t;
+
+/* The coloured noise's (Audio In placeholder's) knob terms, and the metallic
+ * oscillator's increment and phase ratio for the increment they were made
+ * at. */
+typedef struct {
+    int valid;
+    float type, rate, balance, increment;
+    unsigned period;
+    float type_c, balance_c, spread, tone_mix, norm;
+    float metallic_increment, metallic_ratio;
+} sf_colored_noise_cache_t;
+
+/* FM / RM's phase-modulation depth, ring amount and wave segment, kept
+ * while Wave, Timbre and Shape hold still. */
+typedef struct {
+    int valid;
+    float wave, timbre, shape;
+    int segment;
+    float blend, pm, ring;
+} sf_fmrm_cache_t;
+
+/* The Wavefolder's gain, offset and the sine of the folded offset, kept
+ * while its amount and bias hold still. */
+typedef struct {
+    int valid;
+    float amount, bias;
+    float gain, dc, ref_sin;
+} sf_fold_cache_t;
+/* BasicWaves' knob-derived values, kept while Wave, Timbre and Shape hold
+ * still. valid 0 marks it empty. */
+typedef struct {
+    int valid;
+    float wave, timbre, shape;
+    int pulse;          /* Wave <= 0.5: pulse..saw, else saw..double saw */
+    float offset, mix, osc_gain, sine_gain;
+} sf_basic_cache_t;
+
+/* V.Analog's coefficients in two levels, as Karplus': the knob level while
+ * Wave, Timbre and Shape hold still, the pitch level while the increment
+ * does too. */
+typedef struct {
+    int valid;
+    float wave, timbre, shape, increment;
+    /* Knob level. The saw slopes are for a pulse width the pitch leaves
+     * unclamped. */
+    float saw_ratio, saw_pulse_width, triangle_amount, notch_amount, saw_gain;
+    float saw_slope_up, saw_slope_down;
+    float square_pulse_width, square_gain, square_ratio, normalization;
+    /* Pitch level: both oscillators' clamped frequencies and pulse widths. */
+    float saw_frequency, saw_pw, slope_up, slope_down;
+    float master_frequency, slave_frequency, square_pw;
+} sf_vanalog_cache_t;
+
+/* Waveshaper's coefficients, in the same two levels. */
+typedef struct {
+    int valid;
+    float wave, timbre, shape, increment;
+    /* Knob level. */
+    float harmonics, pw, slope, shape_amount, wavefolder_gain;
+    float slope_up, slope_down;
+    /* Pitch level. */
+    float f0, tick_pw, tick_slope_up, tick_slope_down, wf_gain, shape_fractional;
+    int shape_integral;
+} sf_waveshaper_cache_t;
+
+/* SuperWave's and SawX's wave choice, gains and detune ratios (knob level)
+ * and their copies' increments (pitch level; increment -1 when the copies
+ * are off). */
+typedef struct {
+    int valid;
+    float wave, timbre, shape, increment;
+    int selected;
+    float copy_level, norm, level_gain;
+    float ratio[SF_SUPERWAVE_COPIES];
+    float copy_increment[SF_SUPERWAVE_COPIES];
+} sf_superwave_cache_t;
+
+typedef struct {
+    int valid;
+    float wave, timbre, shape, increment;
+    int copies;
+    float chorus, noise_pm, mod_gain, norm_root;
+    float ratio[SF_SUPERWAVE_COPIES];
+    float copy_increment[SF_SUPERWAVE_COPIES];
+} sf_sawx_cache_t;
+/* Chords' per-sample constants, two levels like Karplus: the knob level
+ * (chord voicing, registration gains, wavetable blend) while Wave, Timbre and
+ * Shape hold still, and each chord voice's clamped increments while the
+ * increment does too. valid 0 marks it empty. */
+typedef struct {
+    int valid;
+    float wave, timbre, shape, increment;
+    /* Knob level. */
+    float ratios[SF_CHORD_PHASES];
+    float amplitudes[SF_CHORD_PHASES];
+    float gain_8, gain_4, gain_2, gain_1;
+    float wavetable;
+    int table;
+    float table_mix;
+    unsigned gain_mask;               /* saws with any gain */
+    /* Pitch level: the 8', 4', 2' and 1' increments of each voice. */
+    float inc[SF_CHORD_PHASES][4];
+    unsigned mask[SF_CHORD_PHASES];   /* saws with gain, under Nyquist */
+} sf_chord_cache_t;
+
+/* A wavetable read's knob- and pitch-dependent parts: the family and frame
+ * pair with their crossfades, and the mip level. */
+typedef struct {
+    int family_a, family_b, frame_a, frame_b;
+    float family_mix, frame_mix;
+} sf_wt_pos_t;
+
+/* Wavetable (and the granular placeholders, which stand in with it). Knob
+ * level: the table read position, the width warp's slopes and the tone
+ * filter's coefficient; pitch level: the mip level. */
+typedef struct {
+    int valid;
+    int kind;              /* 1 Wavetable, 2 granular placeholder */
+    int table;
+    float wave, timbre, shape, increment;
+    sf_wt_pos_t pos;
+    float duty, rise, fall;
+    int filter;            /* 0 off, 1 low-pass, 2 high-pass */
+    float alpha;
+    int level;
+} sf_wavetable_cache_t;
+
+/* Harm's knob-level constants (two powf and four exp2 per sample). */
+typedef struct {
+    int valid;
+    float wave, timbre, shape;
+    float keep, rect_mix, noise_pow;
+    float ratio[4];
+} sf_harm_cache_t;
+
+/* Bass: the two wavefolders' gains, offsets and the sine of their offset,
+ * which depend on Timbre and Shape alone. */
+typedef struct {
+    int valid;
+    float timbre, shape;
+    float gain1, dc1, sref1, gain2, dc2, sref2;
+} sf_bass_cache_t;
+
+/* Speech's formant band-pass coefficients, kept while the phoneme and
+ * register positions and the attack click hold still (the positions, not
+ * the knobs, so a word that has reached its last phoneme hits the cache
+ * too), the sustained phoneme position while Wave and Shape hold still, and
+ * the word's last level. valid 0 marks it empty. */
+typedef struct {
+    int valid;
+    float p, r;
+    int click;
+    float g[5], h[5], amp[5];
+    /* The phoneme table interpolated across the register, for one pair of
+     * phonemes: a word walks across a pair for a quarter of its length. */
+    int corners_valid, corner_pi;
+    float corner_r;
+    float fr0[5], fr1[5], ar0[5], ar1[5];
+    int position_valid;
+    float wave, shape, position;
+    /* Word mode: Timbre's stretch, and the age from which the word's level
+     * has reached its last point (it only grows with age). */
+    int stretch_valid;
+    float stretch_timbre, stretch;
+    int word_done;
+    unsigned done_age;
+    int level_valid;
+    float db, level;
+} sf_speech_cache_t;
+
+/* Formant's (Plaits grainlet pair) coefficients in two levels: the knob
+ * level while Wave, Timbre and Shape hold still, and the pitch level while
+ * the increment does too. The carrier's values at the grain's end and start
+ * are filled in at the first carrier reset that needs them. */
+typedef struct {
+    int valid;
+    float wave, timbre, shape, increment;
+    /* Knob level. */
+    float f1, f2, bleed;
+    /* Pitch level. */
+    float f0, carrier_shape, dc_f;
+    int carrier_integral;
+    float carrier_m, carrier_bp, carrier_half_over_bp, carrier_one_minus_bp;
+    int ends_valid;
+    float carrier_end, after;
+} sf_formant_cache_t;
+
+/* Modal's resonator coefficients in two levels: the knob level while
+ * Timbre, Shape and the smoothed structure hold still, and the pitch level
+ * while the increment does too. */
+typedef struct {
+    int valid;
+    float timbre, shape, harmonics_lp, increment;
+    /* Knob level. */
+    float brightness, damping, cutoff_ratio, stretch_base;
+    float stretch[SF_MODAL_MODES], q[SF_MODAL_MODES];
+    /* Pitch level. */
+    float cutoff, exc_g, exc_h;
+    float g[SF_MODAL_MODES], rg[SF_MODAL_MODES], h[SF_MODAL_MODES],
+          gain[SF_MODAL_MODES];
+} sf_modal_cache_t;
+
+/* The Multi Filter's, Surgeon's and Phaser's coefficients, which only move
+ * with Wave, Timbre and Shape (none of them tracks the pitch). valid 0 marks
+ * a cache empty. The Multi Filter's are in two levels, Wave's and Timbre and
+ * Shape's, so a modulated Wave keeps the second. */
+typedef struct {
+    int valid;
+    float wave, timbre, shape;
+    /* Wave level. */
+    float cutoff, g, alpha;
+    /* Timbre and Shape level. */
+    int mode, filter_mode, stages;
+    float stage_res, makeup;
+    /* Both: sf_filter_coefs, when coefs_ok. */
+    int coefs_ok;
+    sf_filter_coefs_t coefs;
+} sf_multifilter_cache_t;
+
+typedef struct {
+    int valid;
+    float wave, timbre, shape;
+    float g, resonance;
+    int filter_mode, coefs_ok;
+    sf_filter_coefs_t coefs;
+} sf_surgeon_cache_t;
+
+typedef struct {
+    int valid;
+    float wave, timbre, shape;
+    int stages;
+    float a, feedback_prev, now, denominator, out_gain;
+} sf_phaser_cache_t;
+
 typedef struct {
     float phase;
     float increment;
@@ -232,6 +486,35 @@ typedef struct {
     /* Karplus and Comb coefficient caches; NULL works them out every sample. */
     sf_karplus_cache_t *karplus_cache;
     sf_comb_cache_t *comb_cache;
+    /* Noise, Two Op FM and Wavefolder caches; NULL works them out every
+     * sample. */
+    sf_noise_cache_t *noise_cache;
+    sf_fm_cache_t *fm_cache;
+    sf_fold_cache_t *fold_cache;
+    sf_colored_noise_cache_t *colored_cache;
+    sf_fmrm_cache_t *fmrm_cache;
+    /* BasicWaves, V.Analog, Waveshaper, SuperWave and SawX caches; NULL
+     * works their coefficients out every sample. */
+    sf_basic_cache_t *basic_cache;
+    sf_vanalog_cache_t *vanalog_cache;
+    sf_waveshaper_cache_t *waveshaper_cache;
+    sf_superwave_cache_t *superwave_cache;
+    sf_sawx_cache_t *sawx_cache;
+    /* Chords, Wavetable (and the granular placeholders), Harm and Bass
+     * caches; NULL works them out every sample. */
+    sf_chord_cache_t *chord_cache;
+    sf_wavetable_cache_t *wavetable_cache;
+    sf_harm_cache_t *harm_cache;
+    sf_bass_cache_t *bass_cache;
+    /* Speech, Formant and Modal coefficient caches; NULL works them out
+     * every sample. */
+    sf_speech_cache_t *speech_cache;
+    sf_formant_cache_t *formant_cache;
+    sf_modal_cache_t *modal_cache;
+    /* Processor coefficient caches; NULL works them out every sample. */
+    sf_multifilter_cache_t *multifilter_cache;
+    sf_surgeon_cache_t *surgeon_cache;
+    sf_phaser_cache_t *phaser_cache;
 } sf_engine_voice_t;
 
 float sf_engine1_sample(const sf_engine_params_t *params,

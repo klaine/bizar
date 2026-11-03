@@ -2981,6 +2981,246 @@ static void test_delay_engine_caches(void) {
     }
 }
 
+static int same_bits(float a, float b) {
+    return memcmp(&a, &b, sizeof(a)) == 0;
+}
+
+/* The tested position's knobs at sample s. Each knob moves on its own while
+ * the other two hold, stepped every 250 samples and then ramped every sample
+ * (as a knob, an automation lane or an LFO moves them), so a cache that
+ * forgets one of its keys is caught. Timbre and Shape move before Wave, whose
+ * smoothing in Modal would otherwise rebuild its cache every sample. The
+ * pitch moves only while all three hold (cache_test_hz), and the opening
+ * hold outlasts Speech's attack click. */
+static void cache_test_knobs(int s, float knobs[3]) {
+    static const int order[3] = {1, 2, 0};
+    knobs[0] = 0.2f;
+    knobs[1] = 0.7f;
+    knobs[2] = 0.4f;
+    if (s >= 2500 && s < 7000) {
+        knobs[order[(s - 2500) / 1500]] = (float)(((s - 2500) / 250) % 6) / 5.0f;
+    } else if (s >= 7000 && s < 10000) {
+        knobs[0] = 0.9f;
+        knobs[1] = 0.1f;
+        knobs[2] = 0.8f;
+    } else if (s >= 10000 && s < 13000) {
+        knobs[order[(s - 10000) / 1000]] = (float)(s % 1000) / 1000.0f;
+    } else if (s >= 13000 && s < 14000) {
+        knobs[0] = 0.3f;
+        knobs[1] = 0.6f;
+        knobs[2] = 0.2f;
+    } else if (s >= 14000) {
+        float t = (float)(s % 2000) / 2000.0f;
+        knobs[0] = t;
+        knobs[1] = 1.0f - t;
+        knobs[2] = 0.5f + 0.5f * sinf((float)s * 0.01f);
+    }
+}
+
+/* Steady, then vibrato and a jump while the knobs hold (7000..10000), then a
+ * high note near the engines' pitch clamps. */
+static float cache_test_hz(int s) {
+    if (s >= 7000 && s < 9000) return 110.0f * (1.0f + 0.02f * sinf((float)s * 0.0007f));
+    if (s >= 9000 && s < 10000) return 330.0f;
+    if (s >= 15000) return 1500.0f;
+    return 110.0f;
+}
+
+/* Every engine's coefficient caches must sound exactly like working the
+ * coefficients out every sample. Each Osc 1 mode (Osc 2 on BasicWaves) and
+ * each Osc 2 mode (Osc 1 on BasicWaves) runs on a voice wired with its caches
+ * and on a twin wired without, through each knob stepped and ramped on its
+ * own, steady pitch, vibrato and a high note, a closed gate, a new note, a
+ * new wavetable and a switch of engine mid-note. */
+static void test_engine_caches_match_uncached(void) {
+    static sf_voice_t cached, plain;
+    for (int position = 1; position <= 2; ++position) {
+        int count = position == 1 ? SF_OSC1_MODE_COUNT : SF_OSC2_MODE_COUNT;
+        for (int mode = 0; mode < count; ++mode) {
+            memset(&cached, 0, sizeof(cached));
+            memset(&plain, 0, sizeof(plain));
+            unsigned age_cached = 0, age_plain = 0;
+            sf_voice_start_params_t pc = mono_params(&age_cached, 1);
+            sf_voice_start_params_t pp = mono_params(&age_plain, 1);
+            sf_voice_start(&cached, 0, 48, 100, 0, 0, &pc);
+            sf_voice_start(&plain, 0, 48, 100, 0, 0, &pp);
+            sf_engine_voice_t c1, c2, p1, p2;
+            sf_voice_wire_engines(&cached, 1, &c1, &c2);
+            sf_voice_wire_engines(&plain, 0, &p1, &p2);
+            /* Mid-note, the tested position switches to Wavetable (or, from
+             * Wavetable, to Sample, which shares its cache) and back. */
+            int partner = position == 1 ? (mode == OSC_WAVETABLE ? OSC_SAMPLE : OSC_WAVETABLE)
+                                        : (mode == ENGINE_WAVETABLE ? ENGINE_SAMPLE : ENGINE_WAVETABLE);
+            for (int s = 0; s < 16000; ++s) {
+                int tested = s >= 13000 && s < 14000 ? partner : mode;
+                int mode1 = position == 1 ? tested : OSC_VA;
+                int mode2 = position == 2 ? tested : ENGINE_VA;
+                if (s == 7000) {
+                    /* A new note (the voices are silent: no envelope runs). */
+                    sf_voice_start(&cached, 0, 55, 90, 0, 0, &pc);
+                    sf_voice_start(&plain, 0, 55, 90, 0, 0, &pp);
+                }
+                float knobs[3];
+                cache_test_knobs(s, knobs);
+                float other[3] = {0.5f, 0.35f, 0.5f};
+                const float *k1 = position == 1 ? knobs : other;
+                const float *k2 = position == 2 ? knobs : other;
+                int late = s >= 8200;   /* a new wavetable mid-note */
+                sf_engine_params_t prm1 = {mode1, k1[0], k1[1], k1[2], late ? 7 : 3};
+                sf_engine_params_t prm2 = {mode2, k2[0], k2[1], k2[2], late ? 5 : 11};
+                float inc1 = cache_test_hz(s) / 44100.0f, inc2 = inc1 * 1.5f;
+                int gate = s < 8000 || s >= 8500;
+                sf_engine_voice_t *pairs[2][2] = {{&c1, &c2}, {&p1, &p2}};
+                sf_voice_t *voices[2] = {&cached, &plain};
+                float raw1[2], mixed[2], raw2[2];
+                for (int v = 0; v < 2; ++v) {
+                    sf_voice_t *voice = voices[v];
+                    sf_engine_voice_t *o1 = pairs[v][0], *o2 = pairs[v][1];
+                    o1->phase = voice->phase1;
+                    o1->increment = inc1;
+                    o1->sub_phase = voice->sub_phase1;
+                    o1->gate = gate;
+                    o2->phase = voice->phase2;
+                    o2->increment = inc2;
+                    o2->sub_phase = voice->sub_phase2;
+                    o2->gate = gate;
+                    sf_voice_prepare_delay(voice, sf_engine1_uses_delay(mode1),
+                                           sf_engine2_uses_delay(mode2));
+                    raw1[v] = sf_engine1_sample(&prm1, o1, o2);
+                    mixed[v] = sf_engine2_mix(&prm2, o2, o1, raw1[v], 0.8f, 0.6f, &raw2[v]);
+                    voice->phase1 += inc1;
+                    if (voice->phase1 >= 1.0f) voice->phase1 -= 1.0f;
+                    voice->phase2 += inc2;
+                    if (voice->phase2 >= 1.0f) voice->phase2 -= 1.0f;
+                    voice->sub_phase1 += inc1 * 0.5f;
+                    if (voice->sub_phase1 >= 1.0f) voice->sub_phase1 -= 1.0f;
+                    voice->sub_phase2 += inc2 * 0.5f;
+                    if (voice->sub_phase2 >= 1.0f) voice->sub_phase2 -= 1.0f;
+                }
+                if (!same_bits(raw1[0], raw1[1]) || !same_bits(mixed[0], mixed[1])
+                    || !same_bits(raw2[0], raw2[1])) {
+                    fprintf(stderr, "osc%d mode %d differs at sample %d: %.9g/%.9g %.9g/%.9g\n",
+                            position, mode, s, (double)raw1[0], (double)raw1[1],
+                            (double)mixed[0], (double)mixed[1]);
+                    assert(0);
+                }
+            }
+        }
+    }
+}
+
+/* Osc 2's Wavefolder at full drive reaches about +-19, past the four
+ * reflections that cover +-9: it used to clip flat at +-1 for much of each
+ * cycle instead of folding. */
+static void test_wavefolder_folds_at_full_drive(void) {
+    sf_engine_voice_t osc1, osc2;
+    memset(&osc1, 0, sizeof(osc1));
+    memset(&osc2, 0, sizeof(osc2));
+    sf_engine_params_t params = {ENGINE_FOLD, 1.0f, 1.0f, 0.5f, 0};
+    int clipped = 0;
+    for (int s = 0; s < 4000; ++s) {
+        float input = sinf(6.2831853f * (float)s / 400.0f);
+        float raw2 = 0.0f;
+        (void)sf_engine2_mix(&params, &osc2, &osc1, input, 1.0f, 1.0f, &raw2);
+        if (fabsf(raw2) >= 1.0f) ++clipped;
+    }
+    assert(clipped < 40);   /* under 1%: only the fold's own peaks */
+}
+
+/* Speech, sustained: Wave and Shape place the phoneme on a ring of five, so
+ * positions 4..5 blend the last phoneme into the first; they used to hold
+ * the last one still. Word mode: Timbre's stretch sets the length of the
+ * vowel walk as well as of the level (0.85 s at stretch 1, 0.36 s at Timbre
+ * 1, where it used to stay 0.85 s). */
+static float speech_render(float wave, float timbre, float shape, int samples,
+                           sf_speech_cache_t *cache) {
+    sf_speech_state_t state;
+    memset(&state, 0, sizeof(state));
+    sf_engine_voice_t voice;
+    memset(&voice, 0, sizeof(voice));
+    voice.speech_state = &state;
+    voice.speech_cache = cache;
+    voice.increment = 130.0f / 44100.0f;
+    voice.gate = 1;
+    sf_engine_params_t params = {OSC_SPEECH, wave, timbre, shape, 0};
+    float sum = 0.0f;
+    for (int s = 0; s < samples; ++s) {
+        sum += fabsf(sf_engine1_sample(&params, &voice, &voice));
+        voice.phase += voice.increment;
+        if (voice.phase >= 1.0f) voice.phase -= 1.0f;
+    }
+    return sum;
+}
+
+static void test_speech_phoneme_ring_and_word_length(void) {
+    /* Wave 0.25 + Shape 0.8 and 0.9 sit at 4.2 and 4.6. */
+    assert(speech_render(0.25f, 0.5f, 0.8f, 8000, NULL)
+           != speech_render(0.25f, 0.5f, 0.9f, 8000, NULL));
+    sf_speech_cache_t cache;
+    memset(&cache, 0, sizeof(cache));
+    (void)speech_render(0.6f, 1.0f, 0.5f, 22050, &cache);   /* 0.5 s at Timbre 1 */
+    assert(cache.p > 3.99f);
+    memset(&cache, 0, sizeof(cache));
+    (void)speech_render(0.6f, 0.5f, 0.5f, 22050, &cache);   /* 0.5 s at Timbre 0.5 */
+    assert(fabsf(cache.p - 0.5f * 4.0f / 0.85f) < 0.01f);
+}
+
+/* Harm's partial 1 plays on the voice phase, ratio 1, but its Nyquist check
+ * read 1 + u^3: at Wave 1 a note above about 10.8 kHz went silent. */
+static void test_harm_high_note_sounds(void) {
+    float stack[SF_SUPERWAVE_COPIES] = {0}, chord[SF_CHORD_PHASES] = {0};
+    uint32_t rng = 1u;
+    sf_engine_voice_t voice;
+    memset(&voice, 0, sizeof(voice));
+    voice.stack_phase = stack;
+    voice.chord_phase = chord;
+    voice.rng = &rng;
+    voice.increment = 0.3f;
+    sf_engine_params_t params = {OSC_HARM, 1.0f, 0.0f, 0.0f, 0};
+    float peak = 0.0f;
+    for (int s = 0; s < 1000; ++s) {
+        float out = fabsf(sf_engine1_sample(&params, &voice, &voice));
+        if (out > peak) peak = out;
+        voice.phase += voice.increment;
+        if (voice.phase >= 1.0f) voice.phase -= 1.0f;
+    }
+    assert(peak > 0.05f);
+}
+
+/* Audio In's stand-in: the metallic oscillator ran on the voice phase times
+ * its ratio, which jumped at every wrap of the voice phase. On its own phase,
+ * its half periods are even (to a sample either way). */
+static void test_audio_in_metallic_phase_runs_on(void) {
+    float noise = 0.0f, stack[SF_SUPERWAVE_COPIES] = {0};
+    unsigned count = 0;
+    uint32_t rng = 7u;
+    sf_engine_voice_t voice;
+    memset(&voice, 0, sizeof(voice));
+    voice.noise_state = &noise;
+    voice.noise_count = &count;
+    voice.rng = &rng;
+    voice.stack_phase = stack;
+    voice.increment = 220.0f / 44100.0f;
+    sf_engine_params_t params = {OSC_AUDIOIN, 1.0f, 0.6f, 0.0f, 0};   /* all metallic, no tone */
+    int last_sign = 0, last_edge = -1, shortest = 1 << 30, longest = 0;
+    for (int s = 0; s < 20000; ++s) {
+        float out = sf_engine1_sample(&params, &voice, &voice);
+        int sign = out > 0.0f ? 1 : -1;
+        if (last_sign && sign != last_sign) {
+            if (last_edge >= 0 && s > 1000) {
+                int gap = s - last_edge;
+                if (gap < shortest) shortest = gap;
+                if (gap > longest) longest = gap;
+            }
+            last_edge = s;
+        }
+        last_sign = sign;
+        voice.phase += voice.increment;
+        if (voice.phase >= 1.0f) voice.phase -= 1.0f;
+    }
+    assert(longest - shortest <= 2);
+}
+
 /* A new note only marks the delay lines stale; each is cleared just before
  * an engine that uses it runs, and a legato note keeps what is in them. */
 static void test_delay_lines_cleared_on_use(void) {
@@ -3055,6 +3295,11 @@ int main(void) {
     test_seq_note_overflow();
     test_harmo_weight_cache();
     test_delay_engine_caches();
+    test_engine_caches_match_uncached();
+    test_wavefolder_folds_at_full_drive();
+    test_speech_phoneme_ring_and_word_length();
+    test_harm_high_note_sounds();
+    test_audio_in_metallic_phase_runs_on();
     test_delay_lines_cleared_on_use();
     puts("Bizar plugin tests passed");
     return 0;

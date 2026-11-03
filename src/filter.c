@@ -90,3 +90,39 @@ float sf_filter_process(sf_filter_state_t *state, int mode, float g,
     if (mode == FILTER_NOTCH) return v2 + high;
     return v2;
 }
+
+int sf_filter_coefs(sf_filter_state_t *state, float g, float resonance,
+                    sf_filter_coefs_t *coefs) {
+    if (!isfinite(resonance)) return 0;
+    float res = filter_clampf(resonance, 0.0f, 1.0f);
+    if (res > 0.95f) return 0;
+    /* The same expressions as sf_filter_process, so the same roundings. */
+    float passband = sf_filter_passband(state, res);
+    coefs->drive = 1.0f + 0.32f * res;
+    coefs->passband = passband;
+    coefs->damping = (2.0f - 2.04f * res) * passband;
+    return sf_filter_coefs_g(coefs, g);
+}
+
+float sf_filter_process_coefs(sf_filter_state_t *state, int mode,
+                              const sf_filter_coefs_t *coefs, float input) {
+    if (!isfinite(input) || !isfinite(state->low) || !isfinite(state->band)) {
+        state->low = 0.0f;
+        state->band = 0.0f;
+        return 0.0f;
+    }
+    float driven_in = input * coefs->drive * coefs->passband;
+    /* Below self-oscillation the damping is positive, so the clip always runs. */
+    float ic1eq = steiner_diode_clip(state->low);
+    float ic2eq = state->band;
+    float v3 = driven_in - ic2eq;
+    float v1 = coefs->a1 * ic1eq + coefs->a2 * v3;
+    float v2 = ic2eq + coefs->a2 * ic1eq + coefs->a3 * v3;
+    state->low = filter_clampf(2.0f * v1 - ic1eq, -6.0f, 6.0f);
+    state->band = filter_clampf(2.0f * v2 - ic2eq, -6.0f, 6.0f);
+    float high = driven_in - coefs->damping * v1 - v2;
+    if (mode == FILTER_BP) return v1;
+    if (mode == FILTER_HP) return high;
+    if (mode == FILTER_NOTCH) return v2 + high;
+    return v2;
+}

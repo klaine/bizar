@@ -219,6 +219,45 @@ typedef struct {
     sf_karplus_cache_t karplus1;
     sf_karplus_cache_t karplus2;
     sf_comb_cache_t comb2;
+    /* Noise, Two Op FM, Wavefolder and Audio In (coloured noise) coefficients
+     * per position, and FM / RM's (Osc 2 only). */
+    sf_noise_cache_t noise1;
+    sf_noise_cache_t noise2;
+    sf_fm_cache_t fm1;
+    sf_fm_cache_t fm2;
+    sf_fold_cache_t fold1;
+    sf_fold_cache_t fold2;
+    sf_colored_noise_cache_t colored1;
+    sf_colored_noise_cache_t colored2;
+    sf_fmrm_cache_t fmrm2;
+    /* BasicWaves, V.Analog, Waveshaper, SuperWave and SawX coefficients per
+     * position. */
+    sf_basic_cache_t basic1;
+    sf_basic_cache_t basic2;
+    sf_vanalog_cache_t vanalog_cache1;
+    sf_vanalog_cache_t vanalog_cache2;
+    sf_waveshaper_cache_t waveshaper1;
+    sf_waveshaper_cache_t waveshaper2;
+    sf_superwave_cache_t superwave1;
+    sf_superwave_cache_t superwave2;
+    sf_sawx_cache_t sawx1;
+    sf_sawx_cache_t sawx2;
+    /* Chords, Wavetable, Harm and Bass coefficients per position. */
+    sf_chord_cache_t chord_cache1, chord_cache2;
+    sf_wavetable_cache_t wt_cache1, wt_cache2;
+    sf_harm_cache_t harm_cache1, harm_cache2;
+    sf_bass_cache_t bass_cache1, bass_cache2;
+    /* Speech, Formant and Modal coefficients, one per oscillator position. */
+    sf_speech_cache_t speech_cache1;
+    sf_speech_cache_t speech_cache2;
+    sf_formant_cache_t formant_cache1;
+    sf_formant_cache_t formant_cache2;
+    sf_modal_cache_t modal_cache1;
+    sf_modal_cache_t modal_cache2;
+    /* Osc 2 processor coefficients (see sf_multifilter_cache_t). */
+    sf_multifilter_cache_t multifilter2;
+    sf_surgeon_cache_t surgeon2;
+    sf_phaser_cache_t phaser2;
     /* Up to twelve all-pass stages for the Phaser Filter, plus its feedback memory,
      * which is an Osc 2 processor only. */
     float apf[SF_PHASER_MAX_STAGES];
@@ -279,6 +318,12 @@ float sf_env_shape_setup(sf_env_shape_t *shape, int stage, int curve, float ms);
  * along its knob (see voice.c). `stage` is ENV_ATTACK, ENV_DECAY or
  * ENV_RELEASE. */
 float sf_env_time_mod(int stage, float ms, float amount);
+/* Points the two oscillator positions' engine voices at this voice's state
+ * and, with caches, at its coefficient caches (without, the engines work
+ * everything out every sample). The per-sample fields (phase, increment,
+ * sub phase, gate) are the caller's. */
+void sf_voice_wire_engines(sf_voice_t *voice, int caches,
+                           sf_engine_voice_t *osc1, sf_engine_voice_t *osc2);
 /* Clears a stale delay line (see delay_stale1) that an oscillator position is
  * about to use. Call before the engines run on every sample: a note or a mode
  * that needs a line can start at any sample. */

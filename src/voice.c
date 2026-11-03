@@ -405,6 +405,94 @@ static void voice_start_now(sf_voice_t *voice, int index, int note, int velocity
     }
 }
 
+void sf_voice_wire_engines(sf_voice_t *voice, int caches,
+                           sf_engine_voice_t *osc1, sf_engine_voice_t *osc2) {
+    *osc1 = (sf_engine_voice_t){
+        .rng = &voice->rng,
+        .noise_state = &voice->noise_state1,
+        .noise_count = &voice->noise_count1,
+        .stack_phase = voice->super_phase1,
+        .chord_phase = voice->chord_phase1,
+        .vanalog_state = &voice->vanalog1,
+        .filter_state = &voice->osc1_filter,
+        .delay_buf = voice->delay1,
+        .delay_pos = &voice->delay_pos1,
+        .delay_low = &voice->delay_low1,
+        .excitation_left = &voice->karplus_excitation_left1,
+        .formant_dc = &voice->formant_dc1,
+        .modal_state = &voice->modal1,
+        .speech_state = &voice->speech1,
+        .apf = voice->apf,
+        .apf_fb = &voice->apf_fb,
+        .sh_hold = &voice->sh_hold,
+        .sh_count = &voice->sh_count
+    };
+    *osc2 = (sf_engine_voice_t){
+        .rng = &voice->rng,
+        .noise_state = &voice->noise_state2,
+        .noise_count = &voice->noise_count2,
+        .stack_phase = voice->super_phase2,
+        .chord_phase = voice->chord_phase2,
+        .vanalog_state = &voice->vanalog2,
+        .filter_state = &voice->osc2_filter,
+        .multifilter_states = voice->multifilter,
+        .multifilter_lp6 = &voice->multifilter_lp6,
+        .delay_buf = voice->delay2,
+        .delay_pos = &voice->delay_pos2,
+        .delay_low = &voice->delay_low2,
+        .excitation_left = &voice->karplus_excitation_left2,
+        .formant_dc = &voice->formant_dc2,
+        .modal_state = &voice->modal2,
+        .speech_state = &voice->speech2,
+        .apf = voice->apf,
+        .apf_fb = &voice->apf_fb,
+        .sh_hold = &voice->sh_hold,
+        .sh_count = &voice->sh_count
+    };
+    if (!caches) return;
+    osc1->harmo_cache = &voice->harmo1;
+    osc1->karplus_cache = &voice->karplus1;
+    osc1->noise_cache = &voice->noise1;
+    osc1->fm_cache = &voice->fm1;
+    osc1->fold_cache = &voice->fold1;
+    osc1->colored_cache = &voice->colored1;
+    osc1->basic_cache = &voice->basic1;
+    osc1->vanalog_cache = &voice->vanalog_cache1;
+    osc1->waveshaper_cache = &voice->waveshaper1;
+    osc1->superwave_cache = &voice->superwave1;
+    osc1->sawx_cache = &voice->sawx1;
+    osc1->chord_cache = &voice->chord_cache1;
+    osc1->wavetable_cache = &voice->wt_cache1;
+    osc1->harm_cache = &voice->harm_cache1;
+    osc1->bass_cache = &voice->bass_cache1;
+    osc1->speech_cache = &voice->speech_cache1;
+    osc1->formant_cache = &voice->formant_cache1;
+    osc1->modal_cache = &voice->modal_cache1;
+    osc2->harmo_cache = &voice->harmo2;
+    osc2->karplus_cache = &voice->karplus2;
+    osc2->comb_cache = &voice->comb2;
+    osc2->noise_cache = &voice->noise2;
+    osc2->fm_cache = &voice->fm2;
+    osc2->fold_cache = &voice->fold2;
+    osc2->colored_cache = &voice->colored2;
+    osc2->fmrm_cache = &voice->fmrm2;
+    osc2->basic_cache = &voice->basic2;
+    osc2->vanalog_cache = &voice->vanalog_cache2;
+    osc2->waveshaper_cache = &voice->waveshaper2;
+    osc2->superwave_cache = &voice->superwave2;
+    osc2->sawx_cache = &voice->sawx2;
+    osc2->chord_cache = &voice->chord_cache2;
+    osc2->wavetable_cache = &voice->wt_cache2;
+    osc2->harm_cache = &voice->harm_cache2;
+    osc2->bass_cache = &voice->bass_cache2;
+    osc2->speech_cache = &voice->speech_cache2;
+    osc2->formant_cache = &voice->formant_cache2;
+    osc2->modal_cache = &voice->modal_cache2;
+    osc2->multifilter_cache = &voice->multifilter2;
+    osc2->surgeon_cache = &voice->surgeon2;
+    osc2->phaser_cache = &voice->phaser2;
+}
+
 void sf_voice_prepare_delay(sf_voice_t *voice, int osc1_uses, int osc2_uses) {
     if (voice->delay_stale1 && osc1_uses) {
         memset(voice->delay1, 0, sizeof(voice->delay1));

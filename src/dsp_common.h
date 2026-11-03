@@ -11,11 +11,14 @@
 #define SF_PI 3.14159265358979323846f
 #define SF_TWO_PI (2.0f * SF_PI)
 
-/* Clamp to lo..hi. A non-finite value (NaN or inf) lands on lo, so a bad
- * control can never reach the audio path. */
+/* Clamp to lo..hi, for finite lo <= hi. A non-finite value (NaN or inf)
+ * lands on lo, so a bad control can never reach the audio path. Written as two
+ * comparisons rather than with isfinite, which compilers expand into about 20
+ * integer instructions: NaN fails both comparisons, +inf is the one value
+ * above hi that is not clamped to it, and -inf fails x >= lo. */
 static inline float sf_clampf(float x, float lo, float hi) {
-    if (!isfinite(x)) return lo;
-    return x < lo ? lo : (x > hi ? hi : x);
+    if (x > hi) return x == INFINITY ? lo : hi;
+    return x >= lo ? x : lo;
 }
 
 /* xorshift32. A zero state would stay zero forever, so it is reseeded. */

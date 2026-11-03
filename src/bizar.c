@@ -3665,6 +3665,11 @@ static void sf_render_block(void *instance, int16_t *out, int frames) {
     for (int k = 0; k < SM_COUNT; ++k) {
         float prev = *sm_ptr[k];
         *sm_ptr[k] += smooth * (sm_target[k] - *sm_ptr[k]);
+        /* The one-pole stops a float step or two short of its target, or
+         * creeps through denormals towards 0 for a second, and the engines'
+         * coefficient caches miss while it moves: land on the target once
+         * within a millionth of it. */
+        if (fabsf(sm_target[k] - *sm_ptr[k]) < 1e-6f) *sm_ptr[k] = sm_target[k];
         sm_cur[k] = prev;
         sm_inc[k] = frames > 0 ? (*sm_ptr[k] - prev) / (float)frames : 0.0f;
     }
@@ -4184,53 +4189,7 @@ static void sf_render_block(void *instance, int16_t *out, int frames) {
                         ctl->value[k] = target[k];
                         ctl->step[k] = 0.0f;
                     }
-                    ctl->osc1 = (sf_engine_voice_t){
-                        .rng = &voice->rng,
-                        .noise_state = &voice->noise_state1,
-                        .noise_count = &voice->noise_count1,
-                        .stack_phase = voice->super_phase1,
-                        .chord_phase = voice->chord_phase1,
-                        .vanalog_state = &voice->vanalog1,
-                        .filter_state = &voice->osc1_filter,
-                        .delay_buf = voice->delay1,
-                        .delay_pos = &voice->delay_pos1,
-                        .delay_low = &voice->delay_low1,
-                        .excitation_left = &voice->karplus_excitation_left1,
-                        .formant_dc = &voice->formant_dc1,
-                        .modal_state = &voice->modal1,
-                        .speech_state = &voice->speech1,
-                        .apf = voice->apf,
-                        .apf_fb = &voice->apf_fb,
-                        .sh_hold = &voice->sh_hold,
-                        .sh_count = &voice->sh_count,
-                        .harmo_cache = &voice->harmo1,
-                        .karplus_cache = &voice->karplus1
-                    };
-                    ctl->osc2 = (sf_engine_voice_t){
-                        .rng = &voice->rng,
-                        .noise_state = &voice->noise_state2,
-                        .noise_count = &voice->noise_count2,
-                        .stack_phase = voice->super_phase2,
-                        .chord_phase = voice->chord_phase2,
-                        .vanalog_state = &voice->vanalog2,
-                        .filter_state = &voice->osc2_filter,
-                        .multifilter_states = voice->multifilter,
-                        .multifilter_lp6 = &voice->multifilter_lp6,
-                        .delay_buf = voice->delay2,
-                        .delay_pos = &voice->delay_pos2,
-                        .delay_low = &voice->delay_low2,
-                        .excitation_left = &voice->karplus_excitation_left2,
-                        .formant_dc = &voice->formant_dc2,
-                        .modal_state = &voice->modal2,
-                        .speech_state = &voice->speech2,
-                        .apf = voice->apf,
-                        .apf_fb = &voice->apf_fb,
-                        .sh_hold = &voice->sh_hold,
-                        .sh_count = &voice->sh_count,
-                        .harmo_cache = &voice->harmo2,
-                        .karplus_cache = &voice->karplus2,
-                        .comb_cache = &voice->comb2
-                    };
+                    sf_voice_wire_engines(voice, 1, &ctl->osc1, &ctl->osc2);
                     ctl->valid = 1;
                     ctl->age = voice->age;
                 } else {

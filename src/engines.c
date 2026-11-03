@@ -20,6 +20,32 @@ static float engine_exp2f(float x) {
                  + fpart * (0.05550411f + fpart * 0.00961813f))));
 }
 
+/* Keeps clang from vectorizing a short loop where measured slower (a vector
+ * divide across five lanes). */
+#if defined(__clang__)
+#define SF_SCALAR_LOOP _Pragma("clang loop vectorize(disable) interleave(disable)")
+#else
+#define SF_SCALAR_LOOP
+#endif
+
+/* engine_exp2f with the power of two built from its exponent bits: for
+ * ipart in -24..24, ldexpf(1, ipart) is that same exact power of two. */
+static float engine_exp2f_bits(float x) {
+    x = sf_clampf(x, -24.0f, 24.0f);
+    int ipart = (int)floorf(x);
+    float fpart = x - (float)ipart;
+    union { uint32_t u; float f; } scale = { (uint32_t)(ipart + 127) << 23 };
+    return scale.f * (1.0f + fpart * (0.69314718f + fpart * (0.24022651f
+                 + fpart * (0.05550411f + fpart * 0.00961813f))));
+}
+
+/* 2^-n for 0 <= n <= 126, built from its exponent bits. Multiplying by it is
+ * exact scaling, so it rounds just as dividing by 2^n does. */
+static float engine_pow2_neg(int n) {
+    union { uint32_t u; float f; } v = {(uint32_t)(127 - n) << 23};
+    return v.f;
+}
+
 static float engine_fast_svf_g(float cutoff_hz) {
     float w = SF_PI * sf_clampf(cutoff_hz, 20.0f, 18000.0f) / SF_SAMPLE_RATE;
     float w2 = w * w;
@@ -41,15 +67,12 @@ static float engine_sin_cycle(float phase) {
 
 static float poly_blep(float phase, float increment) {
     if (increment <= 0.0f) return 0.0f;
-    if (phase < increment) {
-        float t = phase / increment;
-        return t + t - t * t - 1.0f;
-    }
-    if (phase > 1.0f - increment) {
-        float t = (phase - 1.0f) / increment;
-        return t * t + t + t + 1.0f;
-    }
-    return 0.0f;
+    /* One division at an edge and none between them: clang would otherwise
+     * work out both edges' divisions on every call and pick one. */
+    int rising = phase < increment;
+    if (!rising && !(phase > 1.0f - increment)) return 0.0f;
+    float t = (rising ? phase : phase - 1.0f) / increment;
+    return rising ? t + t - t * t - 1.0f : t * t + t + t + 1.0f;
 }
 
 static float triangle_sample(float phase) {
@@ -115,23 +138,45 @@ static float basic_saw(float phase, float increment) {
 
 static float minifreak_basic_wave_sample(const sf_engine_params_t *params,
                                          const sf_engine_voice_t *voice) {
-    float wave = sf_clampf(params->wave, 0.0f, 1.0f);
-    float timbre = sf_clampf(params->timbre, 0.0f, 1.0f);
-    float shape = sf_clampf(params->shape, 0.0f, 1.0f);
-    float offset = 0.5f - 0.45f * timbre;
-    float shifted = voice->phase + offset;
+    /* The knob-derived values only move with the knobs (sf_basic_cache_t). */
+    sf_basic_cache_t local, *c = voice->basic_cache;
+    if (!c) {
+        local = (sf_basic_cache_t){0};
+        c = &local;
+    }
+    if (!c->valid || c->wave != params->wave || c->timbre != params->timbre
+        || c->shape != params->shape) {
+        c->wave = params->wave;
+        c->timbre = params->timbre;
+        c->shape = params->shape;
+        float wave = sf_clampf(params->wave, 0.0f, 1.0f);
+        float timbre = sf_clampf(params->timbre, 0.0f, 1.0f);
+        float shape = sf_clampf(params->shape, 0.0f, 1.0f);
+        c->offset = 0.5f - 0.45f * timbre;
+        c->pulse = wave <= 0.5f;
+        c->mix = c->pulse ? 1.0f - 2.0f * wave : 2.0f * wave - 1.0f;
+        c->osc_gain = 1.0f - 0.52f * shape;
+        c->sine_gain = shape;
+        c->valid = 1;
+    }
+    float shifted = voice->phase + c->offset;
     if (shifted >= 1.0f) shifted -= 1.0f;
     float saw = basic_saw(voice->phase, voice->increment);
     float other = basic_saw(shifted, voice->increment);
     float osc;
-    if (wave <= 0.5f) {
-        float pulse_mix = 1.0f - 2.0f * wave;
+    if (c->pulse) {
+        float pulse_mix = c->mix;
         osc = saw + (saw - other - saw) * pulse_mix;
     } else {
-        float double_mix = 2.0f * wave - 1.0f;
+        float double_mix = c->mix;
         osc = saw + other * double_mix;
     }
-    return SF_BASIC_GAIN * ((1.0f - 0.52f * shape) * osc
+    float osc_gain = c->osc_gain;
+    float shape = c->sine_gain;
+    /* At Shape 0 the sine adds a zero, which leaves osc_gain * osc as it is
+     * (osc is never -0), so it is not worked out. */
+    if (shape == 0.0f) return SF_BASIC_GAIN * (osc_gain * osc);
+    return SF_BASIC_GAIN * (osc_gain * osc
                             + shape * engine_sin_cycle(voice->sub_phase));
 }
 
@@ -147,6 +192,45 @@ static float wavetable_frame_sample(int family, int frame, int level, float phas
     float a = (float)table[index] * (1.0f / 32768.0f);
     float b = (float)table[next] * (1.0f / 32768.0f);
     return a + (b - a) * fraction;
+}
+
+static void wavetable_position(float family_position, float position, sf_wt_pos_t *p) {
+    family_position = sf_clampf(family_position, 0.0f, (float)(SF_WT_FAMILIES - 1));
+    p->family_a = (int)family_position;
+    p->family_b = p->family_a + 1 < SF_WT_FAMILIES ? p->family_a + 1 : p->family_a;
+    p->family_mix = family_position - (float)p->family_a;
+    float frame_position = sf_clampf(position, 0.0f, 1.0f) * (float)(SF_WT_FRAMES - 1);
+    p->frame_a = (int)frame_position;
+    p->frame_b = p->frame_a + 1 < SF_WT_FRAMES ? p->frame_a + 1 : p->frame_a;
+    p->frame_mix = frame_position - (float)p->frame_a;
+}
+
+static int wavetable_level(float increment) {
+    float harmonic_budget = 0.45f / increment;
+    int level = 0;
+    while (level + 1 < SF_WT_LEVELS
+           && (float)sf_wt_max_harmonics[level] > harmonic_budget) ++level;
+    return level;
+}
+
+/* wavetable_sample with the position and level worked out. A whole frame
+ * position gives frame_b no weight, so its read is skipped like family_b's
+ * (a0 is never -0, so adding the zero changes nothing). */
+static float wavetable_sample_at(const sf_wt_pos_t *p, int level, float phase) {
+    float a0 = wavetable_frame_sample(p->family_a, p->frame_a, level, phase);
+    float sample0 = a0;
+    if (p->frame_mix != 0.0f) {
+        float b0 = wavetable_frame_sample(p->family_a, p->frame_b, level, phase);
+        sample0 = a0 + (b0 - a0) * p->frame_mix;
+    }
+    if (p->family_mix == 0.0f) return sample0;
+    float a1 = wavetable_frame_sample(p->family_b, p->frame_a, level, phase);
+    float sample1 = a1;
+    if (p->frame_mix != 0.0f) {
+        float b1 = wavetable_frame_sample(p->family_b, p->frame_b, level, phase);
+        sample1 = a1 + (b1 - a1) * p->frame_mix;
+    }
+    return sample0 + (sample1 - sample0) * p->family_mix;
 }
 
 static float wavetable_sample(float family_position, float position,
@@ -176,29 +260,69 @@ static float wavetable_sample(float family_position, float position,
     return sample0 + (sample1 - sample0) * family_mix;
 }
 
-static float fold_sample_biased(float sample, float amount, float bias) {
-    /* West-Coast sinusoidal + reflection wavefolder with pre-folder DC bias
-     * for even-harmonic asymmetry (Braids FOLD / Noise Engineering style). */
-    float gain = 1.0f + amount * 6.5f;
-    float dc = bias * (0.2f + amount * 0.65f);
-    float x = sample * gain + dc;
+/* West-Coast sinusoidal + reflection wavefolder with pre-folder DC bias
+ * for even-harmonic asymmetry (Braids FOLD / Noise Engineering style). It is
+ * split in two: what Amount and Bias alone decide (fold_prepare), which the
+ * engines cache, and the per-sample fold (fold_apply). ref_sin is the sine
+ * of the folded offset, which takes the offset back out of the output. */
+static float fold_ref_sin(float dc) {
     float ref = dc;
-    for (int i = 0; i < 4; ++i) {
-        if (x > 1.0f) x = 2.0f - x;
-        else if (x < -1.0f) x = -2.0f - x;
-        else break;
-    }
     for (int i = 0; i < 4; ++i) {
         if (ref > 1.0f) ref = 2.0f - ref;
         else if (ref < -1.0f) ref = -2.0f - ref;
         else break;
     }
-    float sin_fold = sinf(x * (0.5f * SF_PI)) - sinf(ref * (0.5f * SF_PI)) * 0.5f;
+    /* sin(0) is 0 with its sign, which an unbiased fold (Destroy) always has. */
+    return ref == 0.0f ? ref : sinf(ref * (0.5f * SF_PI));
+}
+
+static void fold_prepare(float amount, float bias, float *gain, float *dc, float *ref_sin) {
+    *gain = 1.0f + amount * 6.5f;
+    *dc = bias * (0.2f + amount * 0.65f);
+    *ref_sin = fold_ref_sin(*dc);
+}
+
+/* Kept out of line: inlined into Bass, Apple clang pairs its sinf with
+ * Bass's cosf into one sincos call, which rounds differently. */
+__attribute__((noinline))
+static float fold_apply(float sample, float gain, float dc, float ref_sin) {
+    float x = sample * gain + dc;
+    /* Four reflections fold |x| <= 9, but Osc 2's drive reaches about 19,
+     * which used to clip flat at +-1 instead of folding. The fold repeats
+     * every 4, so drop whole periods first. */
+    if (x > 9.0f || x < -9.0f) x = fmodf(x - 1.0f, 4.0f) + 1.0f;
+    for (int i = 0; i < 4; ++i) {
+        if (x > 1.0f) x = 2.0f - x;
+        else if (x < -1.0f) x = -2.0f - x;
+        else break;
+    }
+    float sin_fold = sinf(x * (0.5f * SF_PI)) - ref_sin * 0.5f;
     float blended = x + (sin_fold - x) * 0.65f;
     return sf_clampf(blended, -1.0f, 1.0f);
 }
 
+static float fold_sample_biased(float sample, float amount, float bias) {
+    float gain, dc, ref_sin;
+    fold_prepare(amount, bias, &gain, &dc, &ref_sin);
+    return fold_apply(sample, gain, dc, ref_sin);
+}
+
+/* fold_sample_biased with its knob-only terms kept in a sf_fold_cache_t. */
+static float fold_sample_cached(sf_fold_cache_t *c, float sample, float amount,
+                                float bias) {
+    if (!c) return fold_sample_biased(sample, amount, bias);
+    if (!c->valid || c->amount != amount || c->bias != bias) {
+        c->amount = amount;
+        c->bias = bias;
+        fold_prepare(amount, bias, &c->gain, &c->dc, &c->ref_sin);
+        c->valid = 1;
+    }
+    return fold_apply(sample, c->gain, c->dc, c->ref_sin);
+}
+
 static float warp_phase(float phase, float amount) {
+    /* No warp adds exactly zero to a phase in [0, 1). */
+    if (amount == 0.0f) return phase;
     float warped = phase + sinf(SF_TWO_PI * phase) * amount * 0.12f;
     if (warped < 0.0f) warped += 1.0f;
     else if (warped >= 1.0f) warped -= 1.0f;
@@ -211,32 +335,63 @@ static float noise_sample(uint32_t *rng) {
 
 static float colored_noise_sample(const sf_engine_voice_t *voice, float type,
                                   float rate, float balance) {
-    type = sf_clampf(type, 0.0f, 1.0f);
-    rate = sf_clampf(rate, 0.0f, 1.0f);
-    balance = sf_clampf(balance, 0.0f, 1.0f);
+    /* The knob terms, and the metallic oscillator's from the increment, are
+     * worked out when those change (see sf_colored_noise_cache_t). */
+    sf_colored_noise_cache_t local, *c = voice->colored_cache;
+    if (!c) {
+        local = (sf_colored_noise_cache_t){0};
+        c = &local;
+    }
+    int knobs = !c->valid || c->type != type || c->rate != rate || c->balance != balance;
+    if (knobs) {
+        c->type = type;
+        c->rate = rate;
+        c->balance = balance;
+        c->type_c = sf_clampf(type, 0.0f, 1.0f);
+        float r = sf_clampf(rate, 0.0f, 1.0f);
+        c->balance_c = sf_clampf(balance, 0.0f, 1.0f);
+        /* Rate reduces the noise update rate, creating the MiniFreak's particle
+         * character; Type selects particle -> white -> metallic noise. */
+        c->period = 1u + (unsigned)(r * r * 63.0f);
+        c->spread = engine_exp2f((r - 0.5f) * 6.0f);
+        c->tone_mix = c->balance_c * 0.65f;
+        c->norm = sqrtf(1.0f + c->tone_mix * c->tone_mix);
+    }
+    if (knobs || c->increment != voice->increment) {
+        c->increment = voice->increment;
+        c->metallic_increment = sf_clampf(voice->increment * c->spread, 0.00001f, 0.49f);
+        c->metallic_ratio = c->metallic_increment / fmaxf(voice->increment, 0.00001f);
+    }
+    c->valid = 1;
+    type = c->type_c;
+    balance = c->balance_c;
 
-    /* Rate reduces the noise update rate, creating the MiniFreak's particle
-     * character; Type selects particle -> white -> metallic noise. */
-    unsigned period = 1u + (unsigned)(rate * rate * 63.0f);
     if (!voice->noise_state || !voice->rng) return 0.0f;
     if (!voice->noise_count || *voice->noise_count == 0u) {
         *voice->noise_state = noise_sample(voice->rng);
-        if (voice->noise_count) *voice->noise_count = period;
+        if (voice->noise_count) *voice->noise_count = c->period;
     }
     if (voice->noise_count) --(*voice->noise_count);
     float particle = *voice->noise_state;
     float white = noise_sample(voice->rng);
-    float metallic_increment = sf_clampf(voice->increment
-        * engine_exp2f((rate - 0.5f) * 6.0f), 0.00001f, 0.49f);
-    float metallic_phase = voice->phase * (metallic_increment
-        / fmaxf(voice->increment, 0.00001f));
-    metallic_phase -= floorf(metallic_phase);
-    float metallic = basic_wave_sample(metallic_phase, metallic_increment, 0.0f, 0.5f);
     float noise;
     if (type < 0.5f) {
         float blend = type * 2.0f;
         noise = particle + (white - particle) * blend;
     } else {
+        /* The metallic oscillator is only worked out where it is heard. It
+         * keeps its own phase where it can: the voice phase times the ratio
+         * jumped at every wrap of the voice phase unless the ratio was whole. */
+        float metallic_phase;
+        if (voice->stack_phase) {
+            metallic_phase = voice->stack_phase[0];
+            float next = metallic_phase + c->metallic_increment;
+            voice->stack_phase[0] = next - floorf(next);
+        } else {
+            metallic_phase = voice->phase * c->metallic_ratio;
+            metallic_phase -= floorf(metallic_phase);
+        }
+        float metallic = basic_wave_sample(metallic_phase, c->metallic_increment, 0.0f, 0.5f);
         float blend = (type - 0.5f) * 2.0f;
         noise = white + (metallic - white) * blend;
     }
@@ -250,8 +405,7 @@ static float colored_noise_sample(const sf_engine_voice_t *voice, float type,
         tone = triangle_sample(voice->phase);
     else
         tone = basic_wave_sample(voice->phase, voice->increment, 0.0f, 0.5f);
-    float tone_mix = balance * 0.65f;
-    return (noise + tone * tone_mix) / sqrtf(1.0f + tone_mix * tone_mix);
+    return (noise + tone * c->tone_mix) / c->norm;
 }
 
 /* MiniFreak Noise engine, measured on MiniFreak V (Osc 1 and Osc 2 alike;
@@ -354,7 +508,9 @@ static float noise_table(const float table[SF_NOISE_W_POINTS][SF_NOISE_T_POINTS]
     return a + (b - a) * wf;
 }
 
-static float mf_noise_dust(const sf_engine_voice_t *voice, float wave, float timbre) {
+/* The dust's filter coefficients, density and level for a Wave (<= 0.5) and
+ * Timbre. */
+static void mf_noise_dust_coefficients(sf_noise_cache_t *c, float wave, float timbre) {
     int wi = 0;
     while (wi < SF_NOISE_W_POINTS - 2 && wave > g_noise_w[wi + 1]) ++wi;
     float wf = sf_clampf((wave - g_noise_w[wi]) / (g_noise_w[wi + 1] - g_noise_w[wi]), 0.0f, 1.0f);
@@ -376,12 +532,22 @@ static float mf_noise_dust(const sf_engine_voice_t *voice, float wave, float tim
     float p_hp = hp0;
     float p_x = (1.0f - al) * hp0 * (1.0f - (1.0f - ah) * al / (1.0f - al * ah));
     float power = density * (p_lp + 2.0f * mix * p_x + mix * mix * p_hp);
-    float gain = engine_exp2f((level_db + SF_NOISE_ENGINE_DB) * 0.16609640f)
-               / sqrtf(power > 1e-12f ? power : 1e-12f);
+    c->al = al;
+    c->ah = ah;
+    c->hp0 = hp0;
+    c->mix = mix;
+    c->density = density;
+    c->gain = engine_exp2f((level_db + SF_NOISE_ENGINE_DB) * 0.16609640f)
+            / sqrtf(power > 1e-12f ? power : 1e-12f);
+}
 
+static float mf_noise_dust(const sf_engine_voice_t *voice, const sf_noise_cache_t *c) {
+    float al = c->al;
+    float ah = c->ah;
+    float hp0 = c->hp0;
     float click = 0.0f;
     uint32_t r = sf_xorshift32(voice->rng);
-    if ((float)(r >> 8) * (1.0f / 16777216.0f) < density)
+    if ((float)(r >> 8) * (1.0f / 16777216.0f) < c->density)
         click = (r & 1u) ? 1.0f : -1.0f;
     float *lp = &voice->filter_state->low;
     float *hp = &voice->filter_state->band;
@@ -389,25 +555,41 @@ static float mf_noise_dust(const sf_engine_voice_t *voice, float wave, float tim
     float hp_out = hp0 * (click - *voice->noise_state) + ah * *hp;
     *voice->noise_state = click;
     *hp = hp_out;
-    return gain * (*lp + mix * hp_out);
+    return c->gain * (*lp + c->mix * hp_out);
 }
 
-static float mf_noise_metal(const sf_engine_voice_t *voice, float wave, float timbre) {
+/* The metal bank's six increments and gains and its level for a Wave and
+ * Timbre. */
+static void mf_noise_metal_coefficients(sf_noise_cache_t *c, float wave, float timbre) {
     float scale = (1.0f + 4.0f * timbre) / SF_SAMPLE_RATE;
     float thin = sf_clampf((1.0f - wave) / 0.375f, 0.0f, 1.0f);
     float others = thin * thin * sqrtf(thin);
+    for (int i = 0; i < 6; ++i) {
+        c->metal_inc[i] = sf_clampf(g_noise_metal_hz[i] * scale, 0.0f, 0.45f);
+        c->metal_g[i] = i == 2 ? 1.0f : (i == 0 ? fmaxf(others, 0.3f) : others);
+    }
+    c->metal_level = engine_exp2f((noise_wave_table(g_noise_metal_db, wave)
+                                   + SF_NOISE_ENGINE_DB) * 0.16609640f);
+}
+
+static float mf_noise_metal(const sf_engine_voice_t *voice, const sf_noise_cache_t *c) {
     float sum = 0.0f;
     for (int i = 0; i < 6; ++i) {
         float *phase = i < 5 ? &voice->chord_phase[i] : &voice->stack_phase[0];
-        float increment = sf_clampf(g_noise_metal_hz[i] * scale, 0.0f, 0.45f);
+        float increment = c->metal_inc[i];
         float p = *phase + increment;
         p -= floorf(p);
         *phase = p;
         float edge = p - 0.5f;
         if (edge < 0.0f) edge += 1.0f;
-        float square = (p < 0.5f ? 1.0f : -1.0f) + poly_blep(p, increment)
-                     - poly_blep(edge, increment);
-        float g = i == 2 ? 1.0f : (i == 0 ? fmaxf(others, 0.3f) : others);
+        /* Away from both edges the two corrections are 0 and (1 + 0) - 0
+         * is 1, so they (and their divisions) are only worked out next to
+         * an edge. */
+        float square = p < 0.5f ? 1.0f : -1.0f;
+        if (p < increment || p > 1.0f - increment
+            || edge < increment || edge > 1.0f - increment)
+            square = square + poly_blep(p, increment) - poly_blep(edge, increment);
+        float g = c->metal_g[i];
         sum += g * square;
     }
     /* 2 kHz one-pole high-pass (stack_phase[1..2] hold its state). */
@@ -415,48 +597,83 @@ static float mf_noise_metal(const sf_engine_voice_t *voice, float wave, float ti
     float out = 0.5f * (1.0f + a) * (sum - voice->stack_phase[1]) + a * voice->stack_phase[2];
     voice->stack_phase[1] = sum;
     voice->stack_phase[2] = out;
-    return out * engine_exp2f((noise_wave_table(g_noise_metal_db, wave)
-                               + SF_NOISE_ENGINE_DB) * 0.16609640f);
+    return out * c->metal_level;
+}
+
+/* Everything the Noise engine works out from the knobs alone (see
+ * sf_noise_cache_t). */
+static void minifreak_noise_coefficients(sf_noise_cache_t *c,
+                                         const sf_engine_params_t *params) {
+    c->wave = params->wave;
+    c->timbre = params->timbre;
+    c->shape = params->shape;
+    float wave = sf_clampf(params->wave, 0.0f, 1.0f);
+    float timbre = sf_clampf(params->timbre, 0.0f, 1.0f);
+    float shape = sf_clampf(params->shape, 0.0f, 1.0f);
+    /* The dust keeps running under the metal bank, fading out towards
+     * Wave 1 (g_noise_dust_fade_db). */
+    float dust_db = noise_wave_table(g_noise_dust_fade_db, wave);
+    c->dust_on = dust_db > -60.0f;
+    if (c->dust_on) {
+        mf_noise_dust_coefficients(c, wave < 0.5f ? wave : 0.5f, timbre);
+        c->dust_fade = engine_exp2f(dust_db * 0.16609640f);
+    }
+    c->metal_on = wave > 0.375f;
+    if (c->metal_on) {
+        float x = sf_clampf((wave - 0.375f) / 0.125f, 0.0f, 1.0f);
+        c->metal_mix = sqrtf(x);
+        mf_noise_metal_coefficients(c, wave, timbre);
+    }
+    c->balance = shape < 0.7f ? shape : 0.7f;
+    c->tone_gain = powf(c->balance / 0.7f, 0.75f);
+    c->tone_level = engine_exp2f((SF_NOISE_TONE_DB + SF_NOISE_ENGINE_DB) * 0.16609640f);
+    c->valid = 1;
 }
 
 static float minifreak_noise_sample(const sf_engine_voice_t *voice,
                                     const sf_engine_params_t *params) {
-    float wave = sf_clampf(params->wave, 0.0f, 1.0f);
-    float timbre = sf_clampf(params->timbre, 0.0f, 1.0f);
-    float shape = sf_clampf(params->shape, 0.0f, 1.0f);
     if (!voice->rng || !voice->noise_state || !voice->filter_state
         || !voice->chord_phase || !voice->stack_phase)
-        return colored_noise_sample(voice, wave, timbre, shape);
-
-    /* The dust keeps running under the metal bank, fading out towards
-     * Wave 1 (g_noise_dust_fade_db). */
-    float noise = 0.0f;
-    float dust_db = noise_wave_table(g_noise_dust_fade_db, wave);
-    if (dust_db > -60.0f)
-        noise = mf_noise_dust(voice, wave < 0.5f ? wave : 0.5f, timbre)
-              * engine_exp2f(dust_db * 0.16609640f);
-    if (wave > 0.375f) {
-        float x = sf_clampf((wave - 0.375f) / 0.125f, 0.0f, 1.0f);
-        noise += mf_noise_metal(voice, wave, timbre) * sqrtf(x);
+        return colored_noise_sample(voice, sf_clampf(params->wave, 0.0f, 1.0f),
+                                    sf_clampf(params->timbre, 0.0f, 1.0f),
+                                    sf_clampf(params->shape, 0.0f, 1.0f));
+    /* The coefficients only move with the knobs, so they are worked out when
+     * those change. */
+    sf_noise_cache_t local, *c = voice->noise_cache;
+    if (!c) {
+        local = (sf_noise_cache_t){0};
+        c = &local;
     }
+    if (!c->valid || c->wave != params->wave || c->timbre != params->timbre
+        || c->shape != params->shape)
+        minifreak_noise_coefficients(c, params);
 
-    float balance = shape < 0.7f ? shape : 0.7f;
-    float tone_gain = powf(balance / 0.7f, 0.75f);
-    float out = noise * (1.0f - balance);
-    if (tone_gain > 0.0f) {
+    float noise = 0.0f;
+    if (c->dust_on)
+        noise = mf_noise_dust(voice, c) * c->dust_fade;
+    if (c->metal_on)
+        noise += mf_noise_metal(voice, c) * c->metal_mix;
+
+    float out = noise * (1.0f - c->balance);
+    if (c->tone_gain > 0.0f) {
+        float shape = sf_clampf(params->shape, 0.0f, 1.0f);
         float phase = voice->phase;
-        float edge = phase - 0.5f;
-        if (edge < 0.0f) edge += 1.0f;
-        float sine = sinf(SF_TWO_PI * phase) * 1.41421356f;
         float tri = triangle_sample(phase) * 1.73205081f;
-        float square = (phase < 0.5f ? 1.0f : -1.0f) + poly_blep(phase, voice->increment)
-                     - poly_blep(edge, voice->increment);
         float tone;
-        if (shape < 0.5f) tone = sine + (tri - sine) * (shape * 2.0f);
-        else if (shape < 0.75f) tone = tri;
-        else tone = tri + (square - tri) * ((shape - 0.75f) * 4.0f);
-        out += tone * tone_gain
-             * engine_exp2f((SF_NOISE_TONE_DB + SF_NOISE_ENGINE_DB) * 0.16609640f);
+        /* Only the waves the blend uses are worked out. */
+        if (shape < 0.5f) {
+            float sine = sinf(SF_TWO_PI * phase) * 1.41421356f;
+            tone = sine + (tri - sine) * (shape * 2.0f);
+        } else if (shape < 0.75f) {
+            tone = tri;
+        } else {
+            float edge = phase - 0.5f;
+            if (edge < 0.0f) edge += 1.0f;
+            float square = (phase < 0.5f ? 1.0f : -1.0f) + poly_blep(phase, voice->increment)
+                         - poly_blep(edge, voice->increment);
+            tone = tri + (square - tri) * ((shape - 0.75f) * 4.0f);
+        }
+        out += tone * c->tone_gain * c->tone_level;
     }
     return out;
 }
@@ -464,16 +681,34 @@ static float minifreak_noise_sample(const sf_engine_voice_t *voice,
 /* SuperWave's Wave knob toggles through four base waveforms, evenly spaced
  * across 0..1: saw (0), square, triangle, sine (1). Saw at 0 is the classic
  * JP-8000 supersaw. */
-static float superwave_wave_sample(float phase, float increment, float wave) {
+static int superwave_wave_select(float wave) {
     /* MiniFreak V switches at 0.25, 0.5 and 0.75 (saw, square, triangle,
      * sine), measured. */
     int selected = (int)(sf_clampf(wave, 0.0f, 1.0f) * 4.0f);
     if (selected < 0) selected = 0;
     if (selected > 3) selected = 3;
+    return selected;
+}
+
+/* basic_wave_sample(phase, increment, 0.0f, 0.5f), the pulse: its saw gets no
+ * weight there, pulse + (saw - pulse) * 0 is the pulse itself (the pulse is
+ * never -0), so it is not worked out. */
+static float basic_square(float phase, float increment) {
+    float duty = 0.1f + 0.8f * 0.5f;
+    float edge = phase - duty;
+    if (edge < 0.0f) edge += 1.0f;
+    return (phase < duty ? 1.0f : -1.0f)
+         + poly_blep(phase, increment) - poly_blep(edge, increment);
+}
+
+static float superwave_wave_sample(float phase, float increment, int selected) {
     switch (selected) {
         default:
-        case 0: return basic_wave_sample(phase, increment, 0.5f, 0.5f);
-        case 1: return basic_wave_sample(phase, increment, 0.0f, 0.5f);
+        /* basic_wave_sample(phase, increment, 0.5f, 0.5f) is its saw: the
+         * octave saws are weighted (0.5 - 0.5) * 2 = 0, and the saw is never
+         * -0, so saw + x * 0 is the saw. */
+        case 0: return basic_saw(phase, increment);
+        case 1: return basic_square(phase, increment);
         case 2: return triangle_sample(phase);
         case 3: return sinf(SF_TWO_PI * phase);
     }
@@ -497,27 +732,58 @@ static float superwave_sample(const sf_engine_params_t *params,
     static const float phase_offset[SF_SUPERWAVE_COPIES] = {
         0.21f, 0.47f, 0.73f, 0.89f
     };
-    float base = superwave_wave_sample(voice->phase, voice->increment, params->wave);
-    float copy_level = sf_clampf(params->shape, 0.0f, 1.0f);
-    if (copy_level <= 0.0001f || !voice->stack_phase) return base * SF_SUPERWAVE_GAIN;
+    /* The wave choice, detune ratios and gains only move with the knobs, the
+     * copies' increments with the pitch (sf_superwave_cache_t). */
+    sf_superwave_cache_t local, *c = voice->superwave_cache;
+    if (!c) {
+        local = (sf_superwave_cache_t){0};
+        c = &local;
+    }
+    int knobs = !c->valid || c->wave != params->wave || c->timbre != params->timbre
+             || c->shape != params->shape;
+    if (knobs) {
+        c->wave = params->wave;
+        c->timbre = params->timbre;
+        c->shape = params->shape;
+        c->selected = superwave_wave_select(params->wave);
+        float copy_level = sf_clampf(params->shape, 0.0f, 1.0f);
+        c->copy_level = copy_level;
+        float t = sf_clampf(params->timbre, 0.0f, 1.0f);
+        float detune_cents = t * (0.32f + 0.68f * t) * 54.0f;
+        for (int copy = 0; copy < SF_SUPERWAVE_COPIES; ++copy) {
+            float cents = detune_spread[copy] * detune_cents;
+            c->ratio[copy] = engine_exp2f_small(cents * (1.0f / 1200.0f));
+        }
+        c->norm = sqrtf(1.0f + copy_level * copy_level * (float)SF_SUPERWAVE_COPIES);
+        c->level_gain = 1.0f + SF_SUPERWAVE_SHAPE_GAIN * copy_level;
+    }
+    float base = superwave_wave_sample(voice->phase, voice->increment, c->selected);
+    float copy_level = c->copy_level;
+    if (copy_level <= 0.0001f || !voice->stack_phase) {
+        c->valid = 1;
+        c->increment = -1.0f;   /* the copies' increments were not worked out */
+        return base * SF_SUPERWAVE_GAIN;
+    }
+    if (knobs || c->increment != voice->increment) {
+        c->increment = voice->increment;
+        for (int copy = 0; copy < SF_SUPERWAVE_COPIES; ++copy)
+            c->copy_increment[copy] = sf_clampf(voice->increment * c->ratio[copy],
+                                                0.00001f, 0.49f);
+    }
+    c->valid = 1;
 
-    float t = sf_clampf(params->timbre, 0.0f, 1.0f);
-    float detune_cents = t * (0.32f + 0.68f * t) * 54.0f;
     float sum = base;
     for (int copy = 0; copy < SF_SUPERWAVE_COPIES; ++copy) {
-        float cents = detune_spread[copy] * detune_cents;
-        float ratio = engine_exp2f_small(cents * (1.0f / 1200.0f));
-        float increment = sf_clampf(voice->increment * ratio, 0.00001f, 0.49f);
+        float increment = c->copy_increment[copy];
         float phase = voice->stack_phase[copy];
         float read = phase + phase_offset[copy];
         if (read >= 1.0f) read -= 1.0f;
-        sum += superwave_wave_sample(read, increment, params->wave) * copy_level;
+        sum += superwave_wave_sample(read, increment, c->selected) * copy_level;
         phase += increment;
         if (phase >= 1.0f) phase -= 1.0f;
         voice->stack_phase[copy] = phase;
     }
-    float norm = sqrtf(1.0f + copy_level * copy_level * (float)SF_SUPERWAVE_COPIES);
-    return sum / norm * (1.0f + SF_SUPERWAVE_SHAPE_GAIN * copy_level) * SF_SUPERWAVE_GAIN;
+    return sum / c->norm * c->level_gain * SF_SUPERWAVE_GAIN;
 }
 
 /* Output trims that level each engine against MiniFreak V at identical
@@ -756,8 +1022,145 @@ static float plaits_grainlet_tick(float carrier_phase, float f0, float f1,
     return this_sample;
 }
 
+/* plaits_grainlet_carrier with its shape-dependent terms worked out ahead
+ * (formant_carrier_prepare): the same expressions, so the same values. */
+static void formant_carrier_prepare(sf_formant_cache_t *c, float shape) {
+    shape = sf_clampf(shape, 0.0f, 1.0f) * 3.0f;
+    int shape_integral = (int)shape;
+    float shape_fractional = shape - (float)shape_integral;
+    float t = 1.0f - shape_fractional;
+    c->carrier_integral = shape_integral;
+    if (shape_integral == 0) {
+        c->carrier_m = 1.0f + t * t * t * 15.0f;
+    } else if (shape_integral == 1) {
+        float breakpoint = 0.001f + 0.499f * t * t * t;
+        c->carrier_bp = breakpoint;
+        c->carrier_half_over_bp = 0.5f / breakpoint;
+        c->carrier_one_minus_bp = 1.0f - breakpoint;
+    } else {
+        t = 1.0f - t;
+        c->carrier_m = 0.5f + t * t * t * 14.5f;
+    }
+}
+
+static float formant_carrier(const sf_formant_cache_t *c, float phase) {
+    if (c->carrier_integral == 0) {
+        phase = phase * c->carrier_m;
+        if (phase >= 1.0f) phase = 1.0f;
+        phase += 0.75f;
+    } else if (c->carrier_integral == 1) {
+        if (phase < c->carrier_bp) phase *= c->carrier_half_over_bp;
+        else phase = 0.5f + (phase - c->carrier_bp) * 0.5f / c->carrier_one_minus_bp;
+        phase += 0.75f;
+    } else {
+        phase = 0.25f + phase * c->carrier_m;
+        if (phase >= 0.75f) phase = 0.75f;
+    }
+    return (sinf(SF_TWO_PI * phase) + 1.0f) * 0.25f;
+}
+
+static float formant_grain(float carrier, float formant_phase, float bleed) {
+    float formant = sinf(SF_TWO_PI * formant_phase);
+    return carrier * (formant + bleed) / (1.0f + bleed);
+}
+
+/* Both grainlets of plaits_grainlet_tick in one pass. They share the
+ * carrier phase, so the carrier (a sinf) is worked out once, and its values
+ * at a reset are kept in the cache. */
+static float formant_pair_tick(sf_formant_cache_t *c, float carrier_phase,
+                               float *stack) {
+    const float f0 = c->f0;
+    float this1 = stack[2];
+    float this2 = stack[3];
+    float next1 = 0.0f;
+    float next2 = 0.0f;
+    float c_next = carrier_phase + f0;
+    float fp1 = stack[0];
+    float fp2 = stack[1];
+
+    if (c_next >= 1.0f) {
+        if (!c->ends_valid) {
+            c->carrier_end = plaits_grainlet_carrier(1.0f, c->carrier_shape);
+            c->after = plaits_grainlet_value(0.0f, 0.0f, c->carrier_shape, c->bleed);
+            c->ends_valid = 1;
+        }
+        float c_wrap = c_next - 1.0f;
+        float reset_time = c_wrap / f0;
+        float u = 1.0f - reset_time;
+        float before1 = formant_grain(c->carrier_end,
+                                      fp1 + (1.0f - reset_time) * c->f1, c->bleed);
+        float discontinuity1 = c->after - before1;
+        this1 += discontinuity1 * (0.5f * reset_time * reset_time);
+        next1 -= discontinuity1 * (0.5f * u * u);
+        fp1 = reset_time * c->f1;
+        float before2 = formant_grain(c->carrier_end,
+                                      fp2 + (1.0f - reset_time) * c->f2, c->bleed);
+        float discontinuity2 = c->after - before2;
+        this2 += discontinuity2 * (0.5f * reset_time * reset_time);
+        next2 -= discontinuity2 * (0.5f * u * u);
+        fp2 = reset_time * c->f2;
+        c_next = c_wrap;
+    } else {
+        fp1 += c->f1;
+        if (fp1 >= 1.0f) fp1 -= (float)(int)fp1;
+        fp2 += c->f2;
+        if (fp2 >= 1.0f) fp2 -= (float)(int)fp2;
+    }
+
+    float carrier = formant_carrier(c, c_next);
+    next1 += formant_grain(carrier, fp1, c->bleed);
+    next2 += formant_grain(carrier, fp2, c->bleed);
+    stack[0] = fp1;
+    stack[1] = fp2;
+    stack[2] = next1;
+    stack[3] = next2;
+    return this1 + this2;
+}
+
+static float formant_sample_cached(const sf_engine_params_t *params,
+                                   const sf_engine_voice_t *voice,
+                                   sf_formant_cache_t *c) {
+    int knobs = !c->valid || c->wave != params->wave || c->timbre != params->timbre
+             || c->shape != params->shape;
+    if (knobs) {
+        c->wave = params->wave;
+        c->timbre = params->timbre;
+        c->shape = params->shape;
+        float harmonics = sf_clampf(params->wave, 0.0f, 1.0f);
+        float timbre = sf_clampf(params->timbre, 0.0f, 1.0f);
+        float f1_hz = 440.0f * engine_exp2f((24.0f + 84.0f * timbre - 69.0f) / 12.0f);
+        float f1 = sf_clampf(f1_hz / SF_SAMPLE_RATE, 0.0001f, 0.245f);
+        float ratio = engine_exp2f((-24.0f + 48.0f * harmonics) / 12.0f);
+        c->f1 = f1;
+        c->f2 = sf_clampf(f1 * ratio, 0.0001f, 0.245f);
+        float carrier_bleed = harmonics < 0.5f ? 1.0f - 2.0f * harmonics : 0.0f;
+        c->bleed = carrier_bleed * (2.0f - carrier_bleed);
+    }
+    if (knobs || c->increment != voice->increment) {
+        c->increment = voice->increment;
+        float f0 = sf_clampf(voice->increment, 0.00001f, 0.125f);
+        float morph = sf_clampf(params->shape, 0.0f, 1.0f);
+        c->f0 = f0;
+        c->carrier_shape = 0.33f + (morph - 0.33f) * fmaxf(1.0f - f0 * 24.0f, 0.0f);
+        formant_carrier_prepare(c, c->carrier_shape);
+        c->dc_f = 1.0f - expf(-SF_TWO_PI * 0.3f * f0);
+        c->ends_valid = 0;
+    }
+    c->valid = 1;
+
+    float sum = formant_pair_tick(c, voice->phase, voice->stack_phase);
+    if (voice->formant_dc) {
+        float hp = sum - *voice->formant_dc;
+        *voice->formant_dc += c->dc_f * hp;
+        sum = hp;
+    }
+    return sum * 1.35f;
+}
+
 static float formant_sample(const sf_engine_params_t *params,
                             const sf_engine_voice_t *voice) {
+    if (voice->formant_cache && voice->stack_phase)
+        return formant_sample_cached(params, voice, voice->formant_cache);
     float f0 = sf_clampf(voice->increment, 0.00001f, 0.125f);
     float harmonics = sf_clampf(params->wave, 0.0f, 1.0f);
     float timbre = sf_clampf(params->timbre, 0.0f, 1.0f);
@@ -866,6 +1269,27 @@ static float speech_svf_bp(float *state_1, float *state_2, float in,
     return bp;
 }
 
+/* speech_svf_bp in two halves, the coefficients and the filter, so the
+ * coefficients can be kept: the same expressions, so the same values. */
+static void speech_svf_coefficients(float frequency, float q, float *g_out,
+                                    float *h_out) {
+    const float a = 3.736e-01f * SF_PI * SF_PI * SF_PI;
+    float g = frequency * (SF_PI + a * frequency * frequency);
+    float r = 1.0f / q;
+    *g_out = g;
+    *h_out = 1.0f / (1.0f + r * g + g * g);
+}
+
+static float speech_svf_bp_run(float *state_1, float *state_2, float in,
+                               float g, float r, float h) {
+    float hp = (in - r * *state_1 - g * *state_1 - *state_2) * h;
+    float bp = g * hp + *state_1;
+    *state_1 = g * hp + bp;
+    float lp = g * bp + *state_2;
+    *state_2 = g * bp + lp;
+    return bp;
+}
+
 /* MiniFreak Speech has two regimes, measured on MiniFreak V with each note
  * retriggered after the knobs were set. From Wave 0.375 up it plays a spoken
  * word once and then falls silent; below that it is a sustained voice. In
@@ -903,16 +1327,23 @@ static int speech_is_word(float wave) {
     return wave >= 0.375f;
 }
 
-/* Word loudness in dB below peak, `seconds` after the trigger. */
-static float speech_word_level_db(float seconds, float timbre) {
+/* speech_word_level_db in two halves: Timbre's stretch, then the level. The
+ * same expressions, so the same values. *done is set once the level has
+ * reached the contour's last point. */
+static float speech_word_stretch_for(float timbre) {
     float position = sf_clampf(timbre, 0.0f, 1.0f) * (float)(SF_SPEECH_STRETCH_POINTS - 1);
     int i = (int)position;
     if (i > SF_SPEECH_STRETCH_POINTS - 2) i = SF_SPEECH_STRETCH_POINTS - 2;
-    float stretch = speech_word_stretch[i]
+    return speech_word_stretch[i]
         + (speech_word_stretch[i + 1] - speech_word_stretch[i]) * (position - (float)i);
+}
+
+static float speech_word_level_db_stretched(float seconds, float stretch, int *done) {
     float x = seconds / stretch;
-    if (x >= speech_word_time[SF_SPEECH_WORD_POINTS - 1])
+    if (x >= speech_word_time[SF_SPEECH_WORD_POINTS - 1]) {
+        *done = 1;
         return speech_word_db[SF_SPEECH_WORD_POINTS - 1];
+    }
     int k = 1;
     while (x > speech_word_time[k]) ++k;
     float span = speech_word_time[k] - speech_word_time[k - 1];
@@ -963,55 +1394,139 @@ static float speech_sample(const sf_engine_params_t *params,
 
     /* Type (Wave) chooses the library offset, Word (Shape) the phoneme and
      * Timbre the vocal register, which is how the MiniFreak labels them. */
-    float p = fmodf(params->wave * 4.0f + params->shape * 4.0f, 5.0f);
-    float r = sf_clampf(params->timbre, 0.0f, 1.0f) * 3.999f;
+    sf_speech_cache_t local, *c = voice->speech_cache;
+    if (!c) {
+        local = (sf_speech_cache_t){0};
+        c = &local;
+    }
+    float p;
+    float r;
     if (word) {
         /* Word mode: the vowel walks through the library over the word and
-         * Timbre sets its length instead of the vocal register. */
-        float stretch_seconds = sf_clampf(seconds, 0.0f, 4.0f);
+         * Timbre sets its length instead of the vocal register. The walk
+         * (0.85 s at stretch 1) and the level contour below both run on the
+         * stretched time, so a longer word sounds its vowels for longer. */
+        if (!c->stretch_valid || c->stretch_timbre != params->timbre) {
+            c->stretch = speech_word_stretch_for(params->timbre);
+            c->stretch_timbre = params->timbre;
+            c->stretch_valid = 1;
+            c->word_done = 0;
+        }
+        float stretch_seconds = sf_clampf(seconds / c->stretch, 0.0f, 4.0f);
         p = stretch_seconds * 4.0f / 0.85f;
+        if (p > 3.999f) p = 3.999f;
         r = SF_SPEECH_REG_BASE + SF_SPEECH_REG_SLOPE * sf_clampf(params->timbre, 0.0f, 1.0f);
+    } else {
+        if (!c->position_valid || c->wave != params->wave || c->shape != params->shape) {
+            c->position = fmodf(params->wave * 4.0f + params->shape * 4.0f, 5.0f);
+            c->wave = params->wave;
+            c->shape = params->shape;
+            c->position_valid = 1;
+        }
+        /* The library is a ring: from 4 to 5 the last phoneme blends back
+         * into the first (see pn below), rather than holding still. */
+        p = c->position;
+        if (!(p < 5.0f)) p = 0.0f;
+        r = sf_clampf(params->timbre, 0.0f, 1.0f) * 3.999f;
     }
-    if (p > 3.999f) p = 3.999f;
     if (p < 0.0f) p = 0.0f;
-    int pi = (int)p;
-    int ri = (int)r;
-    float pf = p - (float)pi;
-    float rf = r - (float)ri;
+    int click = state->click_left > 0;
 
-    float out = 0.0f;
-    for (int i = 0; i < 5; ++i) {
-        float f00 = (float)speech_phonemes[pi][ri][i][0];
-        float f01 = (float)speech_phonemes[pi][ri + 1][i][0];
-        float f10 = (float)speech_phonemes[pi + 1][ri][i][0];
-        float f11 = (float)speech_phonemes[pi + 1][ri + 1][i][0];
-        float a00 = (float)speech_phonemes[pi][ri][i][1];
-        float a01 = (float)speech_phonemes[pi][ri + 1][i][1];
-        float a10 = (float)speech_phonemes[pi + 1][ri][i][1];
-        float a11 = (float)speech_phonemes[pi + 1][ri + 1][i][1];
+    /* The five band-passes' coefficients move only with the phoneme and
+     * register positions and the attack click. */
+    if (!c->valid || c->p != p || c->r != r || c->click != click) {
+        c->p = p;
+        c->r = r;
+        c->click = click;
+        c->valid = 1;
+        int pi = (int)p;
+        int pn = pi < 4 ? pi + 1 : 0;
+        float pf = p - (float)pi;
+        if (!c->corners_valid || c->corner_pi != pi || c->corner_r != r) {
+            c->corners_valid = 1;
+            c->corner_pi = pi;
+            c->corner_r = r;
+            int ri = (int)r;
+            float rf = r - (float)ri;
+            for (int i = 0; i < 5; ++i) {
+                float f00 = (float)speech_phonemes[pi][ri][i][0];
+                float f01 = (float)speech_phonemes[pi][ri + 1][i][0];
+                float f10 = (float)speech_phonemes[pn][ri][i][0];
+                float f11 = (float)speech_phonemes[pn][ri + 1][i][0];
+                float a00 = (float)speech_phonemes[pi][ri][i][1];
+                float a01 = (float)speech_phonemes[pi][ri + 1][i][1];
+                float a10 = (float)speech_phonemes[pn][ri][i][1];
+                float a11 = (float)speech_phonemes[pn][ri + 1][i][1];
+                c->fr0[i] = f00 + (f01 - f00) * rf;
+                c->fr1[i] = f10 + (f11 - f10) * rf;
+                c->ar0[i] = a00 + (a01 - a00) * rf;
+                c->ar1[i] = a10 + (a11 - a10) * rf;
+            }
+        }
+        SF_SCALAR_LOOP for (int i = 0; i < 5; ++i) {
+            float fr0 = c->fr0[i];
+            float fr1 = c->fr1[i];
+            float f = fr0 + (fr1 - fr0) * pf;
+            float ar0 = c->ar0[i];
+            float ar1 = c->ar1[i];
+            c->amp[i] = (ar0 + (ar1 - ar0) * pf) * (1.0f / 256.0f);
 
-        float fr0 = f00 + (f01 - f00) * rf;
-        float fr1 = f10 + (f11 - f10) * rf;
-        float f = fr0 + (fr1 - fr0) * pf;
-        float ar0 = a00 + (a01 - a00) * rf;
-        float ar1 = a10 + (a11 - a10) * rf;
-        float amp = (ar0 + (ar1 - ar0) * pf) * (1.0f / 256.0f);
-
-        if (f >= 160.0f) f = 160.0f;
-        float formant = (55.0f / SF_SAMPLE_RATE)
-                      * engine_exp2f((f - 33.0f) * (1.0f / 12.0f));
-        if (state->click_left > 0 && i == 0) formant *= 0.5f;
-        out += speech_svf_bp(&state->formant_1[i], &state->formant_2[i],
-                             excitation, formant, 20.0f) * amp;
+            if (f >= 160.0f) f = 160.0f;
+            float formant = (55.0f / SF_SAMPLE_RATE)
+                          * engine_exp2f_bits((f - 33.0f) * (1.0f / 12.0f));
+            if (click && i == 0) formant *= 0.5f;
+            speech_svf_coefficients(formant, 20.0f, &c->g[i], &c->h[i]);
+        }
     }
+
+    /* The band-passes are independent: four run together, then the fifth;
+     * only the sum keeps its order. */
+    float band[5];
+    {
+        float s1v[4], s2v[4], gv[4], hv[4];
+        for (int i = 0; i < 4; ++i) {
+            s1v[i] = state->formant_1[i];
+            s2v[i] = state->formant_2[i];
+            gv[i] = c->g[i];
+            hv[i] = c->h[i];
+        }
+        for (int i = 0; i < 4; ++i)
+            band[i] = speech_svf_bp_run(&s1v[i], &s2v[i], excitation, gv[i],
+                                        1.0f / 20.0f, hv[i]);
+        for (int i = 0; i < 4; ++i) {
+            state->formant_1[i] = s1v[i];
+            state->formant_2[i] = s2v[i];
+        }
+        band[4] = speech_svf_bp_run(&state->formant_1[4], &state->formant_2[4],
+                                    excitation, c->g[4], 1.0f / 20.0f, c->h[4]);
+    }
+    float out = 0.0f;
+    for (int i = 0; i < 5; ++i) out += band[i] * c->amp[i];
     /* The first sustained voice (Wave 0.025..0.2) is a plain formant buzz; the
      * word and the second sustained voice carry a flat, full-range spectrum. */
     if (word || params->wave >= 0.2f)
         out += SF_SPEECH_BREATH * flat_pulse
              + SF_SPEECH_LOW * sinf(SF_TWO_PI * state->pulse_phase);
     if (word) {
-        float db = speech_word_level_db(seconds, params->timbre);
-        out *= engine_exp2f(db * 0.16609640f);
+        /* The level only falls to its last point as the age grows, so from
+         * the age it got there (for this stretch) it stays there. */
+        float db;
+        if (c->word_done && state->age >= c->done_age) {
+            db = speech_word_db[SF_SPEECH_WORD_POINTS - 1];
+        } else {
+            int done = 0;
+            db = speech_word_level_db_stretched(seconds, c->stretch, &done);
+            if (done) {
+                c->word_done = 1;
+                c->done_age = state->age;
+            }
+        }
+        if (!c->level_valid || c->db != db) {
+            c->level = engine_exp2f_bits(db * 0.16609640f);
+            c->db = db;
+            c->level_valid = 1;
+        }
+        out *= c->level;
     }
     return out;
 }
@@ -1054,20 +1569,27 @@ static float plaits_vanalog_detuning(float position) {
         + (intervals[interval + 1] - intervals[interval]) * fraction);
 }
 
-static float plaits_variable_saw_tick(sf_plaits_variable_saw_state_t *state,
-                                      float frequency, float pulse_width,
-                                      float waveshape) {
-    const float notch_depth = 0.2f;
+/* The variable saw's per-pitch set-up: frequency and pulse width clamped as
+ * the oscillator needs them. */
+static float plaits_variable_saw_frequency(float frequency) {
     if (frequency >= 0.25f) frequency = 0.25f;
     if (frequency < 0.00001f) frequency = 0.00001f;
-    if (frequency >= 0.25f) pulse_width = 0.5f;
-    else pulse_width = sf_clampf(pulse_width, frequency * 2.0f,
-                                     1.0f - frequency * 2.0f);
+    return frequency;
+}
 
-    float triangle_amount = sf_clampf(waveshape, 0.0f, 1.0f);
-    float notch_amount = 1.0f - triangle_amount;
-    float slope_up = 1.0f / pulse_width;
-    float slope_down = 1.0f / (1.0f - pulse_width);
+static float plaits_variable_saw_pw(float frequency, float pulse_width) {
+    if (frequency >= 0.25f) return 0.5f;
+    return sf_clampf(pulse_width, frequency * 2.0f, 1.0f - frequency * 2.0f);
+}
+
+/* frequency and pulse_width come from the two functions above, the slopes
+ * are 1 / pulse_width and 1 / (1 - pulse_width), and the amounts are the
+ * clamped waveshape and 1 less it. */
+static float plaits_variable_saw_tick(sf_plaits_variable_saw_state_t *state,
+                                      float frequency, float pulse_width,
+                                      float triangle_amount, float notch_amount,
+                                      float slope_up, float slope_down) {
+    const float notch_depth = 0.2f;
     float phase = state->phase + frequency;
     float sample = state->next_sample;
     float next_sample = 0.0f;
@@ -1104,19 +1626,13 @@ static float plaits_variable_saw_tick(sf_plaits_variable_saw_state_t *state,
     return (2.0f * sample - 1.0f) / (1.0f + notch_depth);
 }
 
+/* The square's frequencies take plaits_variable_saw_frequency's clamp and
+ * its pulse width plaits_variable_saw_pw's, against the slave frequency. */
 static float plaits_variable_shape_square_tick(sf_plaits_sync_state_t *state,
                                                float master_phase,
                                                float master_frequency,
                                                float slave_frequency,
                                                float pulse_width) {
-    if (master_frequency >= 0.25f) master_frequency = 0.25f;
-    if (slave_frequency >= 0.25f) slave_frequency = 0.25f;
-    if (master_frequency < 0.00001f) master_frequency = 0.00001f;
-    if (slave_frequency < 0.00001f) slave_frequency = 0.00001f;
-    if (slave_frequency >= 0.25f) pulse_width = 0.5f;
-    else pulse_width = sf_clampf(pulse_width, slave_frequency * 2.0f,
-                                     1.0f - slave_frequency * 2.0f);
-
     float phase = state->slave_phase;
     float sample = state->next_sample;
     float next_sample = 0.0f;
@@ -1171,42 +1687,93 @@ static float plaits_variable_shape_square_tick(sf_plaits_sync_state_t *state,
 
 static float vanalog_sample(const sf_engine_params_t *params,
                             const sf_engine_voice_t *voice) {
-    sf_engine_params_t remapped;
-    params = remap_params(params, &g_remap_vanalog, &remapped);
-    /* Plaits VA_VARIANT 2: Shape drives a variable pulse/hard-sync oscillator,
-     * Wave controls the variable saw, and Timbre selects the saw/pulse interval. */
-    float wave = sf_clampf(params->wave, 0.0f, 1.0f);
-    float timbre = sf_clampf(params->timbre, 0.0f, 1.0f);
-    float shape = sf_clampf(params->shape, 0.0f, 1.0f);
-    float detune = plaits_vanalog_detuning(timbre);
-    float saw_ratio = engine_exp2f(detune / 12.0f);
-    float saw_increment = sf_clampf(voice->increment * saw_ratio, 0.00001f, 0.25f);
-
-    /* Plaits VA_VARIANT 2 morph mapping: triangle/notch-saw crossover. */
-    float saw_morph = wave;
-    float saw_pulse_width = saw_morph < 0.5f
-        ? saw_morph + 0.5f : 1.0f - (saw_morph - 0.5f) * 2.0f;
-    saw_pulse_width = sf_clampf(saw_pulse_width * 1.1f, 0.005f, 1.0f);
-    float saw_shape = sf_clampf(10.0f - 21.0f * saw_morph, 0.0f, 1.0f);
-    float saw_gain = sf_clampf(8.0f * (1.0f - saw_morph), 0.02f, 1.0f);
-
-    float square_pulse_width = sf_clampf(1.3f * shape - 0.15f, 0.005f, 0.5f);
-    float square_gain = sf_clampf(shape * 8.0f, 0.0f, 1.0f);
-    /* Shape's upper half runs the pulse into hard sync. In the reference the
-     * square plateau extends slightly past the midpoint (~0.535) before hard
-     * sync begins, and the sync interval then climbs at ~255 semitones per
-     * unit of Shape (reaching ~2x at 0.58, ~3x at 0.62, and ~6x at 0.66).
-     * Gentle gain compensation tames the resonant formant peak so it sits in
-     * the same balance against the fundamental as the reference. */
-    float square_sync_semitones = shape <= 0.545f
-        ? 0.0f : (shape - 0.545f) * 280.0f;
-    square_gain /= (1.0f + 0.025f * square_sync_semitones);
-    float square_increment = sf_clampf(
-        voice->increment * engine_exp2f(square_sync_semitones / 12.0f),
-        0.00001f, 0.25f);
-
     sf_vanalog_state_t *state = voice->vanalog_state;
-    if (!state) return standard_wave_sample(voice->phase, voice->increment, wave);
+    if (!state) {
+        sf_engine_params_t remapped;
+        const sf_engine_params_t *p = remap_params(params, &g_remap_vanalog, &remapped);
+        return standard_wave_sample(voice->phase, voice->increment,
+                                    sf_clampf(p->wave, 0.0f, 1.0f));
+    }
+    /* The coefficients only move with the knobs and the pitch, so they are
+     * worked out when those change (see sf_vanalog_cache_t). */
+    sf_vanalog_cache_t local, *c = voice->vanalog_cache;
+    if (!c) {
+        local = (sf_vanalog_cache_t){0};
+        c = &local;
+    }
+    int knobs = !c->valid || c->wave != params->wave || c->timbre != params->timbre
+             || c->shape != params->shape;
+    if (knobs) {
+        c->wave = params->wave;
+        c->timbre = params->timbre;
+        c->shape = params->shape;
+        sf_engine_params_t remapped;
+        const sf_engine_params_t *p = remap_params(params, &g_remap_vanalog, &remapped);
+        /* Plaits VA_VARIANT 2: Shape drives a variable pulse/hard-sync
+         * oscillator, Wave controls the variable saw, and Timbre selects the
+         * saw/pulse interval. */
+        float wave = sf_clampf(p->wave, 0.0f, 1.0f);
+        float timbre = sf_clampf(p->timbre, 0.0f, 1.0f);
+        float shape = sf_clampf(p->shape, 0.0f, 1.0f);
+        float detune = plaits_vanalog_detuning(timbre);
+        c->saw_ratio = engine_exp2f(detune / 12.0f);
+
+        /* Plaits VA_VARIANT 2 morph mapping: triangle/notch-saw crossover. */
+        float saw_morph = wave;
+        float saw_pulse_width = saw_morph < 0.5f
+            ? saw_morph + 0.5f : 1.0f - (saw_morph - 0.5f) * 2.0f;
+        saw_pulse_width = sf_clampf(saw_pulse_width * 1.1f, 0.005f, 1.0f);
+        float saw_shape = sf_clampf(10.0f - 21.0f * saw_morph, 0.0f, 1.0f);
+        float saw_gain = sf_clampf(8.0f * (1.0f - saw_morph), 0.02f, 1.0f);
+        c->saw_pulse_width = saw_pulse_width;
+        c->triangle_amount = sf_clampf(saw_shape, 0.0f, 1.0f);
+        c->notch_amount = 1.0f - c->triangle_amount;
+        c->saw_gain = saw_gain;
+        /* The slopes for a pulse width the pitch does not clamp. */
+        c->saw_slope_up = 1.0f / saw_pulse_width;
+        c->saw_slope_down = 1.0f / (1.0f - saw_pulse_width);
+
+        float square_pulse_width = sf_clampf(1.3f * shape - 0.15f, 0.005f, 0.5f);
+        float square_gain = sf_clampf(shape * 8.0f, 0.0f, 1.0f);
+        /* Shape's upper half runs the pulse into hard sync. In the reference
+         * the square plateau extends slightly past the midpoint (~0.535)
+         * before hard sync begins, and the sync interval then climbs at ~255
+         * semitones per unit of Shape (reaching ~2x at 0.58, ~3x at 0.62, and
+         * ~6x at 0.66). Gentle gain compensation tames the resonant formant
+         * peak so it sits in the same balance against the fundamental as the
+         * reference. */
+        float square_sync_semitones = shape <= 0.545f
+            ? 0.0f : (shape - 0.545f) * 280.0f;
+        square_gain /= (1.0f + 0.025f * square_sync_semitones);
+        c->square_pulse_width = square_pulse_width;
+        c->square_gain = square_gain;
+        c->square_ratio = engine_exp2f(square_sync_semitones / 12.0f);
+        c->normalization = 1.0f / fmaxf(square_gain, saw_gain);
+    }
+    if (knobs || c->increment != voice->increment) {
+        c->increment = voice->increment;
+        float saw_increment = sf_clampf(voice->increment * c->saw_ratio, 0.00001f, 0.25f);
+        float square_increment = sf_clampf(voice->increment * c->square_ratio,
+                                           0.00001f, 0.25f);
+        /* Both increments are already within plaits_variable_saw_frequency's
+         * clamp. */
+        float frequency = saw_increment;
+        float pw = plaits_variable_saw_pw(frequency, c->saw_pulse_width);
+        c->saw_frequency = frequency;
+        c->saw_pw = pw;
+        if (pw == c->saw_pulse_width) {
+            c->slope_up = c->saw_slope_up;
+            c->slope_down = c->saw_slope_down;
+        } else {
+            c->slope_up = 1.0f / pw;
+            c->slope_down = 1.0f / (1.0f - pw);
+        }
+        c->master_frequency = plaits_variable_saw_frequency(voice->increment);
+        c->slave_frequency = square_increment;
+        c->square_pw = plaits_variable_saw_pw(c->slave_frequency, c->square_pulse_width);
+    }
+    c->valid = 1;
+
     if (!state->initialized) {
         state->saw.phase = voice->stack_phase ? voice->stack_phase[0] : voice->phase;
         state->saw.previous_pw = 0.5f;
@@ -1214,18 +1781,21 @@ static float vanalog_sample(const sf_engine_params_t *params,
         state->sync.previous_pw = 0.5f;
         state->initialized = 1;
     }
-    float saw = plaits_variable_saw_tick(&state->saw, saw_increment,
-                                         saw_pulse_width, saw_shape);
+    float saw = plaits_variable_saw_tick(&state->saw, c->saw_frequency, c->saw_pw,
+                                         c->triangle_amount, c->notch_amount,
+                                         c->slope_up, c->slope_down);
     float pulse = plaits_variable_shape_square_tick(&state->sync, voice->phase,
-                                                   voice->increment,
-                                                   square_increment,
-                                                   square_pulse_width);
+                                                   c->master_frequency,
+                                                   c->slave_frequency,
+                                                   c->square_pw);
     if (voice->stack_phase) {
         voice->stack_phase[0] = state->saw.phase;
         voice->stack_phase[1] = state->sync.slave_phase;
     }
 
-    float normalization = 1.0f / fmaxf(square_gain, saw_gain);
+    float saw_gain = c->saw_gain;
+    float square_gain = c->square_gain;
+    float normalization = c->normalization;
     return saw * saw_gain * 0.66f * normalization
          + pulse * square_gain * 0.40f * normalization;
 }
@@ -1239,6 +1809,9 @@ static float vanalog_sample(const sf_engine_params_t *params,
 static float plaits_tame(float f0, float harmonics, float order) {
     f0 *= harmonics;
     float max_f = 0.5f / order;
+    /* At or below max_f the amount is at least 1 and clamps to 1: skip the
+     * division. */
+    if (f0 <= max_f) return 1.0f;
     float max_amount = 1.0f - (f0 - max_f) / (0.5f - max_f);
     max_amount = sf_clampf(max_amount, 0.0f, 1.0f);
     return max_amount * max_amount * max_amount;
@@ -1247,13 +1820,17 @@ static float plaits_tame(float f0, float harmonics, float order) {
 /* Bandlimited variable-slope oscillator (Oscillator::Render<SLOPE>). Returns
  * the current sample. The rising/falling segment is derived from the phase, so
  * the oscillator needs no separate high/low latch. */
-static float plaits_slope_tick(float *phase, float *next_sample,
-                               float frequency, float pw) {
-    frequency = sf_clampf(frequency, 0.000001f, 0.25f);
-    pw = sf_clampf(pw, fabsf(frequency) * 2.0f,
-                       1.0f - 2.0f * fabsf(frequency));
-    float slope_up = 1.0f / pw;
-    float slope_down = 1.0f / (1.0f - pw);
+/* The slope oscillator's pulse width for a frequency already clamped to
+ * 0.000001..0.25 (as the oscillator clamps it). */
+static float plaits_slope_pw(float frequency, float pw) {
+    return sf_clampf(pw, fabsf(frequency) * 2.0f, 1.0f - 2.0f * fabsf(frequency));
+}
+
+/* frequency clamped to 0.000001..0.25, pw from plaits_slope_pw, and the
+ * slopes 1 / pw and 1 / (1 - pw). */
+static inline float plaits_slope_tick(float *phase, float *next_sample,
+                               float frequency, float pw,
+                               float slope_up, float slope_down) {
     float this_sample = *next_sample;
     float next = 0.0f;
     int rising = *phase < pw;
@@ -1299,39 +1876,82 @@ static float plaits_interpolate_hermite(const float *table, float index,
 
 static float waveshaper_sample(const sf_engine_params_t *params,
                                const sf_engine_voice_t *voice) {
-    float f0 = sf_clampf(voice->increment, 0.000001f, 0.25f);
-    float morph = sf_clampf(params->shape, 0.0f, 1.0f);
-    float harmonics = sf_clampf(params->wave, 0.0f, 1.0f);
-    float timbre = sf_clampf(params->timbre, 0.0f, 1.0f);
-
-    /* Start from a bandlimited variable-slope signal; Shape sets its pulse
-     * width (the "Asym" knob). */
-    float pw = morph * 0.45f + 0.5f;
-    float slope = 3.0f + fabsf(morph - 0.5f) * 5.0f;
-    float shape_amount = fabsf(harmonics - 0.5f) * 2.0f;
-    float shape_amount_attenuation = plaits_tame(f0, slope, 16.0f);
-    float wavefolder_gain = timbre;
-    float wavefolder_gain_attenuation = plaits_tame(
-        f0, slope * (3.0f + shape_amount * shape_amount_attenuation * 5.0f),
-        12.0f);
-
-    float shape_mod = 0.5f + (harmonics - 0.5f) * shape_amount_attenuation;
-    float wf_gain = 0.03f + 0.46f * wavefolder_gain
-                  * wavefolder_gain_attenuation;
-
     sf_vanalog_state_t *state = voice->vanalog_state;
     if (!state) return 0.0f;
-    float slope_out = plaits_slope_tick(&state->saw.phase,
-                                        &state->saw.next_sample, f0, pw);
-    /* The triangle operator only feeds the unused auxiliary output, but it is
-     * kept in step with the master phase so the engine stays a faithful port. */
-    plaits_slope_tick(&state->sync.slave_phase, &state->sync.next_sample,
-                      f0, 0.5f);
+    /* The coefficients only move with the knobs and the pitch, so they are
+     * worked out when those change (see sf_waveshaper_cache_t). */
+    sf_waveshaper_cache_t local, *c = voice->waveshaper_cache;
+    if (!c) {
+        local = (sf_waveshaper_cache_t){0};
+        c = &local;
+    }
+    int knobs = !c->valid || c->wave != params->wave || c->timbre != params->timbre
+             || c->shape != params->shape;
+    if (knobs) {
+        c->wave = params->wave;
+        c->timbre = params->timbre;
+        c->shape = params->shape;
+        float morph = sf_clampf(params->shape, 0.0f, 1.0f);
+        float harmonics = sf_clampf(params->wave, 0.0f, 1.0f);
+        float timbre = sf_clampf(params->timbre, 0.0f, 1.0f);
+        /* Start from a bandlimited variable-slope signal; Shape sets its
+         * pulse width (the "Asym" knob). */
+        float pw = morph * 0.45f + 0.5f;
+        c->harmonics = harmonics;
+        c->pw = pw;
+        c->slope = 3.0f + fabsf(morph - 0.5f) * 5.0f;
+        c->shape_amount = fabsf(harmonics - 0.5f) * 2.0f;
+        c->wavefolder_gain = timbre;
+        /* The slopes for a pulse width the pitch does not clamp. */
+        c->slope_up = 1.0f / pw;
+        c->slope_down = 1.0f / (1.0f - pw);
+    }
+    if (knobs || c->increment != voice->increment) {
+        c->increment = voice->increment;
+        float f0 = sf_clampf(voice->increment, 0.000001f, 0.25f);
+        float slope = c->slope;
+        float shape_amount = c->shape_amount;
+        float shape_amount_attenuation = plaits_tame(f0, slope, 16.0f);
+        float wavefolder_gain_attenuation = plaits_tame(
+            f0, slope * (3.0f + shape_amount * shape_amount_attenuation * 5.0f),
+            12.0f);
+        float harmonics = c->harmonics;
+        float wavefolder_gain = c->wavefolder_gain;
+        float shape_mod = 0.5f + (harmonics - 0.5f) * shape_amount_attenuation;
+        c->wf_gain = 0.03f + 0.46f * wavefolder_gain
+                   * wavefolder_gain_attenuation;
+        float shape = shape_mod * 3.9999f;
+        int shape_integral = (int)shape;
+        if (shape_integral > 3) shape_integral = 3;
+        c->shape_integral = shape_integral;
+        c->shape_fractional = shape - (float)shape_integral;
+        /* f0 is already in the slope oscillator's range. */
+        float pw = plaits_slope_pw(f0, c->pw);
+        c->f0 = f0;
+        c->tick_pw = pw;
+        if (pw == c->pw) {
+            c->tick_slope_up = c->slope_up;
+            c->tick_slope_down = c->slope_down;
+        } else {
+            c->tick_slope_up = 1.0f / pw;
+            c->tick_slope_down = 1.0f / (1.0f - pw);
+        }
+    }
+    c->valid = 1;
 
-    float shape = shape_mod * 3.9999f;
-    int shape_integral = (int)shape;
-    if (shape_integral > 3) shape_integral = 3;
-    float shape_fractional = shape - (float)shape_integral;
+    float f0 = c->f0;
+    float slope_out = plaits_slope_tick(&state->saw.phase, &state->saw.next_sample,
+                                        f0, c->tick_pw,
+                                        c->tick_slope_up, c->tick_slope_down);
+    /* The triangle operator only feeds the unused auxiliary output, but it is
+     * kept in step with the master phase so the engine stays a faithful port.
+     * Its pulse width 0.5 is never clamped (f0 <= 0.25), so its slopes are
+     * exactly 2. */
+    plaits_slope_tick(&state->sync.slave_phase, &state->sync.next_sample,
+                      f0, 0.5f, 2.0f, 2.0f);
+
+    int shape_integral = c->shape_integral;
+    float shape_fractional = c->shape_fractional;
     const int16_t *shape_1 = plaits_lut_ws_table[shape_integral];
     const int16_t *shape_2 = plaits_lut_ws_table[shape_integral + 1];
 
@@ -1348,7 +1968,7 @@ static float waveshaper_sample(const sf_engine_params_t *params,
     float y = y0 + (y1 - y0) * ws_fractional;
 
     float mix = x + (y - x) * shape_fractional;
-    float index = sf_clampf(mix * wf_gain + 0.5f, 0.001f, 0.999f);
+    float index = sf_clampf(mix * c->wf_gain + 0.5f, 0.001f, 0.999f);
     return plaits_interpolate_hermite(plaits_lut_fold + 1, index, 512.0f) * 1.35f;
 }
 
@@ -1549,8 +2169,159 @@ static float modal_lut_stiffness(float structure) {
          + (plaits_lut_stiffness[i + 1] - plaits_lut_stiffness[i]) * fraction;
 }
 
+/* modal_sample with its coefficients kept in a sf_modal_cache_t: the same
+ * expressions in the same order, so the same output. */
+static float modal_sample_cached(const sf_engine_params_t *params,
+                                 const sf_engine_voice_t *voice,
+                                 sf_modal_cache_t *c) {
+    sf_modal_state_t *state = voice->modal_state;
+    const float accent = 0.8f;
+    float structure = sf_clampf(params->wave, 0.0f, 1.0f);
+    int trigger = voice->gate && !state->was_gated;
+    state->was_gated = voice->gate;
+    if (trigger) state->harmonics_lp = structure;
+    state->harmonics_lp += 0.01f * (structure - state->harmonics_lp);
+
+    /* Knob level: everything but the pitch. The structure smoother settles
+     * on a fixed value, so this holds still a few ms after Wave does. */
+    int knobs = !c->valid || c->timbre != params->timbre || c->shape != params->shape
+             || c->harmonics_lp != state->harmonics_lp;
+    if (knobs) {
+        c->timbre = params->timbre;
+        c->shape = params->shape;
+        c->harmonics_lp = state->harmonics_lp;
+        float brightness = sf_clampf(params->timbre, 0.0f, 1.0f);
+        float damping = sf_clampf(params->shape, 0.0f, 1.0f);
+        brightness += 0.25f * accent * (1.0f - brightness);
+        damping += 0.25f * accent * (1.0f - damping);
+        c->brightness = brightness;
+        c->damping = damping;
+        const float range = 60.0f;
+        c->cutoff_ratio = modal_semitones_to_ratio(
+            (brightness * (2.0f - brightness) - 0.5f) * range);
+        const float stiffness0 = modal_lut_stiffness(state->harmonics_lp);
+        float stiffness = stiffness0;
+        float stretch_base = 1.0f;
+        for (int i = 0; i < 2; ++i) {
+            stretch_base += stiffness;
+            stiffness *= stiffness < 0.0f ? 0.93f : 0.98f;
+        }
+        c->stretch_base = stretch_base;
+        stiffness = stiffness0;
+        float stretch_factor = 1.0f;
+        float q_sqrt = modal_semitones_to_ratio(damping * 79.7f);
+        float q = 500.0f * (SF_SAMPLE_RATE / 48000.0f) * q_sqrt * q_sqrt;
+        float mode_brightness = brightness * (1.0f - state->harmonics_lp * 0.3f);
+        mode_brightness *= 1.0f - damping * 0.3f;
+        float q_loss = mode_brightness * (2.0f - mode_brightness) * 0.85f + 0.15f;
+        for (int i = 0; i < SF_MODAL_MODES; ++i) {
+            c->stretch[i] = stretch_factor;
+            c->q[i] = q;
+            stretch_factor += stiffness;
+            stiffness *= stiffness < 0.0f ? 0.93f : 0.98f;
+            q *= q_loss;
+        }
+    }
+    if (knobs || c->increment != voice->increment) {
+        c->increment = voice->increment;
+        const float f = 2.0f * voice->increment;
+        float cutoff = f * c->cutoff_ratio;
+        if (cutoff > 0.499f) cutoff = 0.499f;
+        c->cutoff = cutoff;
+        {
+            const float exc_q = 1.5f;
+            float g = modal_tan_fast(cutoff);
+            float r = 1.0f / exc_q;
+            c->exc_g = g;
+            c->exc_h = 1.0f / (1.0f + r * g + g * g);
+        }
+        float f0 = voice->increment;
+        f0 /= c->stretch_base;
+        float harmonic = f0;
+        float frequencies[SF_MODAL_MODES];
+        for (int i = 0; i < SF_MODAL_MODES; ++i) {
+            float mode_frequency = harmonic * c->stretch[i];
+            if (mode_frequency >= 0.499f) mode_frequency = 0.499f;
+            frequencies[i] = mode_frequency;
+            harmonic += f0;
+        }
+        /* No carried dependency here, so this loop vectorizes. */
+        for (int i = 0; i < SF_MODAL_MODES; ++i) {
+            float mode_frequency = frequencies[i];
+            float mode_attenuation = 1.0f - mode_frequency * 2.0f;
+            float mode_q = 1.0f + mode_frequency * c->q[i];
+            float g = modal_tan_fast(mode_frequency);
+            float r = 1.0f / mode_q;
+            c->g[i] = g;
+            c->rg[i] = r + g;
+            c->h[i] = 1.0f / (1.0f + r * g + g * g);
+            c->gain[i] = plaits_modal_amplitudes[i] * mode_attenuation;
+        }
+    }
+    c->valid = 1;
+
+    float temp = 0.0f;
+    if (trigger) {
+        float attenuation = 1.0f - c->damping * 0.5f;
+        float amplitude = (0.12f + 0.08f * accent) * attenuation;
+        temp = amplitude * modal_semitones_to_ratio(c->cutoff * c->cutoff * 24.0f)
+             / c->cutoff;
+    }
+    {
+        const float exc_q = 1.5f;
+        float g = c->exc_g;
+        float r = 1.0f / exc_q;
+        float h = c->exc_h;
+        float hp = (temp - r * state->excitation_1 - g * state->excitation_1
+                    - state->excitation_2) * h;
+        float bp = g * hp + state->excitation_1;
+        state->excitation_1 = g * hp + bp;
+        float lp = g * bp + state->excitation_2;
+        state->excitation_2 = g * bp + lp;
+        temp = lp;
+    }
+
+    /* The resonators are independent, so they run four at a time; only the
+     * sum has to keep its order. */
+    float band[SF_MODAL_MODES];
+    for (int bank = 0; bank < SF_MODAL_BANKS; ++bank) {
+        /* Local copies: the compiler cannot tell the state from the cache
+         * otherwise, and would not run the four lanes together. */
+        float s1v[4], s2v[4], gv[4], rgv[4], hv[4];
+        for (int slot = 0; slot < 4; ++slot) {
+            s1v[slot] = state->mode_state_1[bank][slot];
+            s2v[slot] = state->mode_state_2[bank][slot];
+            gv[slot] = c->g[bank * 4 + slot];
+            rgv[slot] = c->rg[bank * 4 + slot];
+            hv[slot] = c->h[bank * 4 + slot];
+        }
+        for (int slot = 0; slot < 4; ++slot) {
+            float s1 = s1v[slot];
+            float s2 = s2v[slot];
+            float g = gv[slot];
+            float hp = (temp - rgv[slot] * s1 - s2) * hv[slot];
+            float bp = g * hp + s1;
+            s1 = g * hp + bp;
+            float lp = g * bp + s2;
+            s2 = g * bp + lp;
+            s1v[slot] = s1;
+            s2v[slot] = s2;
+            band[bank * 4 + slot] = bp;
+        }
+        for (int slot = 0; slot < 4; ++slot) {
+            state->mode_state_1[bank][slot] = s1v[slot];
+            state->mode_state_2[bank][slot] = s2v[slot];
+        }
+    }
+    float out = 0.0f;
+    for (int i = 0; i < SF_MODAL_MODES; ++i) out += c->gain[i] * band[i];
+    return out;
+}
+
 static float modal_sample(const sf_engine_params_t *params,
                           const sf_engine_voice_t *voice) {
+    if (voice->modal_state && voice->modal_cache)
+        return modal_sample_cached(params, voice, voice->modal_cache);
     /* Plaits ModalVoice, struck: mallet click -> excitation LPF -> a bank of
      * inharmonic modes. Wave is the structure/inharmonicity, Timbre the
      * exciter brightness and Shape the damping that sets how long the modes
@@ -1691,30 +2462,62 @@ static float sawx_sample(const sf_engine_params_t *params,
                          const sf_engine_voice_t *voice) {
     /* Wave = Saw Mod, Timbre = Noise, Shape = Chorus. */
     static const float spread[SF_SUPERWAVE_COPIES] = {-1.03f, -0.37f, 0.41f, 1.09f};
-    float chorus = sf_clampf(params->shape, 0.0f, 1.0f);
-    float noise_pm = sf_clampf(params->timbre, 0.0f, 1.0f);
-    float mod_gain = 1.0f + 7.0f * sf_clampf(params->wave, 0.0f, 1.0f)
-                   + SF_SAWX_TIMBRE_GAIN * noise_pm;
-    float detune_cents = 10.0f + chorus * 26.0f;
-
-    float sum = sawx_wrapped(voice->phase, mod_gain);
-    float norm = 1.0f;
-
-    if (voice->stack_phase && chorus > 0.001f) {
+    /* The gains and detune ratios only move with the knobs, the copies'
+     * increments with the pitch (sf_sawx_cache_t). */
+    sf_sawx_cache_t local, *c = voice->sawx_cache;
+    if (!c) {
+        local = (sf_sawx_cache_t){0};
+        c = &local;
+    }
+    int knobs = !c->valid || c->wave != params->wave || c->timbre != params->timbre
+             || c->shape != params->shape;
+    if (knobs) {
+        c->wave = params->wave;
+        c->timbre = params->timbre;
+        c->shape = params->shape;
+        float chorus = sf_clampf(params->shape, 0.0f, 1.0f);
+        float noise_pm = sf_clampf(params->timbre, 0.0f, 1.0f);
+        c->chorus = chorus;
+        c->noise_pm = noise_pm;
+        c->mod_gain = 1.0f + 7.0f * sf_clampf(params->wave, 0.0f, 1.0f)
+                    + SF_SAWX_TIMBRE_GAIN * noise_pm;
+        float detune_cents = 10.0f + chorus * 26.0f;
+        float norm = 1.0f;
         for (int copy = 0; copy < SF_SUPERWAVE_COPIES; ++copy) {
-            float ratio = engine_exp2f_small(spread[copy] * detune_cents * (1.0f / 1200.0f));
-            float increment = sf_clampf(voice->increment * ratio, 0.00001f, 0.49f);
+            c->ratio[copy] = engine_exp2f_small(spread[copy] * detune_cents * (1.0f / 1200.0f));
+            norm += chorus * chorus;
+        }
+        c->norm_root = sqrtf(norm);
+        c->copies = chorus > 0.001f;
+    }
+    float mod_gain = c->mod_gain;
+    float sum = sawx_wrapped(voice->phase, mod_gain);
+
+    if (voice->stack_phase && c->copies) {
+        if (knobs || c->increment != voice->increment) {
+            c->increment = voice->increment;
+            for (int copy = 0; copy < SF_SUPERWAVE_COPIES; ++copy)
+                c->copy_increment[copy] = sf_clampf(voice->increment * c->ratio[copy],
+                                                    0.00001f, 0.49f);
+        }
+        float chorus = c->chorus;
+        for (int copy = 0; copy < SF_SUPERWAVE_COPIES; ++copy) {
+            float increment = c->copy_increment[copy];
             float phase = voice->stack_phase[copy];
             sum += sawx_wrapped(phase, mod_gain) * chorus;
-            norm += chorus * chorus;
             phase += increment;
             if (phase >= 1.0f) phase -= 1.0f;
             voice->stack_phase[copy] = phase;
         }
+        /* The copies drift apart, so they add in power: MiniFreak V's level
+         * does not move with Chorus. Without copies the norm is 1, and
+         * dividing by sqrtf(1) leaves the sum as it is. */
+        sum /= c->norm_root;
+    } else {
+        c->increment = -1.0f;   /* the copies' increments were not worked out */
     }
-    /* The copies drift apart, so they add in power: MiniFreak V's level
-     * does not move with Chorus. */
-    sum /= sqrtf(norm);
+    c->valid = 1;
+    float noise_pm = c->noise_pm;
     if (noise_pm > 0.001f) sum += noise_sample(voice->rng) * noise_pm * 0.01f;
     return sum * SF_SAWX_GAIN;
 }
@@ -1735,6 +2538,10 @@ static const float g_harm_phase[4] = {0.0f, -0.075f, -0.085f, -0.17f};
 #define SF_HARM_NOISE 0.8f
 
 static float harm_ratio(int k, float wave) {
+    /* Partial 1 plays on the voice's own phase, so its ratio is 1 at every
+     * Wave. The spread below gave it 1 + u^3 above Wave 0.5, which only the
+     * Nyquist check read: it muted the whole engine an octave early. */
+    if (k == 1) return 1.0f;
     if (wave < 0.5f) {
         float v = 1.0f - 2.0f * wave;
         return 1.0f + (float)(k - 1) * (1.0f - v * v * v);
@@ -1754,11 +2561,27 @@ static float ne_harm_sample(const sf_engine_params_t *params,
     float wave = sf_clampf(params->wave, 0.0f, 1.0f);
     float rect = sf_clampf(params->timbre, 0.0f, 1.0f);
     float shape = sf_clampf(params->shape, 0.0f, 1.0f);
-    float keep = 1.0f - powf(rect, 2.3f);
-    float rect_mix = SF_HARM_RECT * rect * rect * rect;
+    sf_harm_cache_t local, *c = voice->harm_cache;
+    if (!c) {
+        local = (sf_harm_cache_t){0};
+        c = &local;
+    }
+    if (!c->valid || c->wave != params->wave || c->timbre != params->timbre
+        || c->shape != params->shape) {
+        c->wave = params->wave;
+        c->timbre = params->timbre;
+        c->shape = params->shape;
+        c->keep = 1.0f - powf(rect, 2.3f);
+        c->rect_mix = SF_HARM_RECT * rect * rect * rect;
+        for (int k = 1; k <= 4; ++k) c->ratio[k - 1] = harm_ratio(k, wave);
+        c->noise_pow = powf(shape, 1.7f);
+        c->valid = 1;
+    }
+    float keep = c->keep;
+    float rect_mix = c->rect_mix;
     float sum = 0.0f;
     for (int k = 1; k <= 4; ++k) {
-        float ratio = harm_ratio(k, wave);
+        float ratio = c->ratio[k - 1];
         float increment = voice->increment * ratio;
         if (increment >= 0.49f) break;
         float phase;
@@ -1782,7 +2605,7 @@ static float ne_harm_sample(const sf_engine_params_t *params,
         b[1] = 0.96300f * b[1] + white * 0.2965f;
         b[2] = 0.57000f * b[2] + white * 1.0526f;
         float pink = b[0] + b[1] + b[2] + white * 0.1848f;
-        x += pink * SF_HARM_NOISE * powf(shape, 1.7f);
+        x += pink * SF_HARM_NOISE * c->noise_pow;
     }
     return tanhf(x) * SF_HARM_GAIN;
 }
@@ -1798,17 +2621,30 @@ static float ne_bass_sample(const sf_engine_params_t *params,
     /* NE Bass: quadrature oscillators with saturation, a two-stage asymmetric
      * wavefolder, and noise phase-modulation applied between the stages.
      * Wave = Saturate, Timbre = Fold, Shape = Noise. */
-    float theta = SF_TWO_PI * voice->phase;
     float sat = sf_clampf(params->wave, 0.0f, 1.0f);
     float fold = sf_clampf(params->timbre, 0.0f, 1.0f);
     float noise_level = sf_clampf(params->shape, 0.0f, 1.0f);
+    /* The folds' offsets and their sines depend on Timbre and Shape alone. */
+    sf_bass_cache_t local, *k = voice->bass_cache;
+    if (!k) {
+        local = (sf_bass_cache_t){0};
+        k = &local;
+    }
+    if (!k->valid || k->timbre != params->timbre || k->shape != params->shape) {
+        k->timbre = params->timbre;
+        k->shape = params->shape;
+        fold_prepare(fold * 0.6f, 0.0f, &k->gain1, &k->dc1, &k->sref1);
+        fold_prepare(fold * 0.9f, (noise_level - 0.5f) * 0.9f, &k->gain2, &k->dc2, &k->sref2);
+        k->valid = 1;
+    }
 
+    float theta = SF_TWO_PI * voice->phase;
     float s = sinf(theta);
     float c = cosf(theta);
     float drive = 1.0f + sat * 6.0f;
     float satur_cos = c * drive / (1.0f + fabsf(c) * drive * 0.55f);
 
-    float fold1 = fold_sample_biased(satur_cos, fold * 0.6f, 0.0f);
+    float fold1 = fold_apply(satur_cos, k->gain1, k->dc1, k->sref1);
     /* The noise is dark on MiniFreak V, so it is low-passed first
      * (filter_state is free in this engine). */
     float noise = noise_sample(voice->rng);
@@ -1820,7 +2656,7 @@ static float ne_bass_sample(const sf_engine_params_t *params,
     }
     float noise_pm = noise * noise_level * 0.5f;
     float mixed = fold1 * (0.55f + 0.45f * s) + noise_pm;
-    return fold_sample_biased(mixed, fold * 0.9f, (noise_level - 0.5f) * 0.9f);
+    return fold_apply(mixed, k->gain2, k->dc2, k->sref2);
 }
 
 /* -------------------------------------------------- sample/granular stubs */
@@ -1832,9 +2668,28 @@ static float granular_placeholder_sample(const sf_engine_params_t *params,
      * this module deliberately does not carry yet, but a preset naming one must
      * still load and make a sound, so the wavetable oscillator stands in with
      * the same three controls and a grain-retrigger window on top. */
-    float tone = wavetable_sample(params->wave * (SF_WT_FAMILIES - 1), params->timbre,
-                                  warp_phase(voice->phase, params->shape),
-                                  voice->increment);
+    float tone;
+    sf_wavetable_cache_t *c = voice->wavetable_cache;
+    if (c) {
+        int knobs = !c->valid || c->kind != 2 || c->wave != params->wave
+                 || c->timbre != params->timbre;
+        if (knobs) {
+            c->kind = 2;
+            c->wave = params->wave;
+            c->timbre = params->timbre;
+            wavetable_position(params->wave * (SF_WT_FAMILIES - 1), params->timbre, &c->pos);
+        }
+        if (knobs || c->increment != voice->increment) {
+            c->increment = voice->increment;
+            c->level = wavetable_level(voice->increment);
+        }
+        c->valid = 1;
+        tone = wavetable_sample_at(&c->pos, c->level, warp_phase(voice->phase, params->shape));
+    } else {
+        tone = wavetable_sample(params->wave * (SF_WT_FAMILIES - 1), params->timbre,
+                                warp_phase(voice->phase, params->shape),
+                                voice->increment);
+    }
     float density = 1.0f + params->timbre * 7.0f;
     float window = sinf(SF_PI * voice->phase * density);
     return tone * (0.35f + 0.65f * fabsf(window));
@@ -2023,10 +2878,14 @@ static void chord_wavetable_init(void) {
     g_chord_wt_ready = 1;
 }
 
-static float chord_wavetable_sample(float position, float phase) {
+static void chord_wavetable_position(float position, int *table, float *mix) {
     float p = sf_clampf(position, 0.0f, 1.0f) * (float)(SF_CHORD_WT_COUNT - 1);
     int t = p >= (float)(SF_CHORD_WT_COUNT - 1) ? SF_CHORD_WT_COUNT - 2 : (int)p;
-    float tf = p - (float)t;
+    *table = t;
+    *mix = p - (float)t;
+}
+
+static float chord_wavetable_read(int t, float tf, float phase) {
     float x = phase * (float)SF_CHORD_WT_SIZE;
     int i = (int)x;
     if (i >= SF_CHORD_WT_SIZE) i = SF_CHORD_WT_SIZE - 1;
@@ -2036,8 +2895,111 @@ static float chord_wavetable_sample(float position, float phase) {
     return SF_CHORD_WT_GAIN * (a + (b - a) * tf);
 }
 
+static float chord_wavetable_sample(float position, float phase) {
+    int t;
+    float tf;
+    chord_wavetable_position(position, &t, &tf);
+    return chord_wavetable_read(t, tf, phase);
+}
+
+/* sf_chord_divide_down with the gains and the four increments worked out,
+ * skipping the saws that are over Nyquist or have no gain: adding nothing
+ * leaves the sum exactly as it was. */
+static float sf_chord_divide_down_cached(float phase, const float *inc, unsigned mask,
+                                         const sf_chord_cache_t *c) {
+    float sum = 0.0f;
+    if (mask & 1u) sum = sf_chord_saw(phase, inc[0]) * c->gain_8;
+    if (mask & 2u)
+        sum += sf_chord_saw(sf_chord_frac(phase * 2.0f), inc[1]) * c->gain_4;
+    if (mask & 4u)
+        sum += sf_chord_saw(sf_chord_frac(phase * 4.0f), inc[2]) * c->gain_2;
+    if (mask & 8u)
+        sum += sf_chord_saw(sf_chord_frac(phase * 8.0f), inc[3]) * c->gain_1;
+    return sum;
+}
+
+static float chord_sample_cached(const sf_engine_params_t *params,
+                                 const sf_engine_voice_t *voice, sf_chord_cache_t *c) {
+    int knobs = !c->valid || c->wave != params->wave || c->timbre != params->timbre
+             || c->shape != params->shape;
+    if (knobs) {
+        c->wave = params->wave;
+        c->timbre = params->timbre;
+        c->shape = params->shape;
+        int chord = (int)(sf_clampf(params->wave, 0.0f, 1.0f) * 10.99f);
+        if (chord < 0) chord = 0;
+        if (chord > 10) chord = 10;
+        float inversion = sf_clampf(params->timbre, 0.0f, 1.0f);
+        float morph = sf_clampf(params->shape, 0.0f, 1.0f);
+        sf_chord_inversion(chord, inversion, c->ratios, c->amplitudes);
+        float registration[6];
+        sf_chord_registration(fmaxf(1.0f - morph * 2.15f, 0.0f), registration);
+        c->gain_8 = registration[0] + 2.0f * registration[1];
+        c->gain_4 = registration[2] - registration[1] + 2.0f * registration[3];
+        c->gain_2 = registration[4] - registration[3] + 2.0f * registration[5];
+        c->gain_1 = -registration[5];
+        c->wavetable = sf_clampf((morph - 0.55f) / 0.025f, 0.0f, 1.0f);
+        float table_pos = (morph - 0.575f) / 0.425f;
+        if (c->wavetable > 0.0f && !g_chord_wt_ready) chord_wavetable_init();
+        chord_wavetable_position(table_pos, &c->table, &c->table_mix);
+        unsigned mask = 0u;
+        if (c->gain_8 != 0.0f) mask |= 1u;
+        if (c->gain_4 != 0.0f) mask |= 2u;
+        if (c->gain_2 != 0.0f) mask |= 4u;
+        if (c->gain_1 != 0.0f) mask |= 8u;
+        c->gain_mask = mask;
+    }
+    if (knobs || c->increment != voice->increment) {
+        c->increment = voice->increment;
+        for (int v = 0; v < 5; ++v) {
+            float increment = sf_clampf(voice->increment * c->ratios[v],
+                                        0.00001f, 0.49f);
+            float *inc = c->inc[v];
+            inc[0] = increment;
+            inc[1] = increment * 2.0f;
+            inc[2] = increment * 4.0f;
+            inc[3] = increment * 8.0f;
+            unsigned mask = c->gain_mask;
+            if (!(inc[3] < 0.49f)) {
+                mask &= ~8u;
+                if (!(inc[2] < 0.49f)) mask &= ~4u;
+                if (!(inc[1] < 0.49f)) mask &= ~2u;
+            }
+            c->mask[v] = mask;
+        }
+    }
+    c->valid = 1;
+
+    float wavetable = c->wavetable;
+    float total = 0.0f;
+    for (int v = 0; v < 5; ++v) {
+        float increment = c->inc[v][0];
+        float phase = voice->chord_phase ? voice->chord_phase[v] : voice->phase;
+        /* A silent voice adds exactly nothing; its phase still runs. */
+        if (c->amplitudes[v] != 0.0f) {
+            if (wavetable <= 0.0f) {
+                total += sf_chord_divide_down_cached(phase, c->inc[v], c->mask[v], c) * c->amplitudes[v];
+            } else if (wavetable >= 1.0f) {
+                total += chord_wavetable_read(c->table, c->table_mix, phase) * c->amplitudes[v];
+            } else {
+                float divide_down = sf_chord_divide_down_cached(phase, c->inc[v], c->mask[v], c);
+                float wave = chord_wavetable_read(c->table, c->table_mix, phase);
+                total += (divide_down * (1.0f - wavetable) + wave * wavetable)
+                       * c->amplitudes[v];
+            }
+        }
+        if (voice->chord_phase) {
+            phase += increment;
+            if (phase >= 1.0f) phase -= 1.0f;
+            voice->chord_phase[v] = phase;
+        }
+    }
+    return total;
+}
+
 static float chord_sample(const sf_engine_params_t *params,
                           const sf_engine_voice_t *voice) {
+    if (voice->chord_cache) return chord_sample_cached(params, voice, voice->chord_cache);
     int chord = (int)(sf_clampf(params->wave, 0.0f, 1.0f) * 10.99f);
     if (chord < 0) chord = 0;
     if (chord > 10) chord = 10;
@@ -2193,6 +3155,20 @@ static const float g_multifilter_hz[11] = {
     10923.0f, 17921.0f
 };
 
+/* log2 of each step's ratio, worked out once at run time (by the same log2f
+ * the per-sample code used, so the same values: a volatile read keeps the
+ * compiler from folding them with its own log2). */
+static float g_multifilter_log2_step[10];
+static volatile int g_multifilter_steps_ready;
+
+static void multifilter_build_steps(void) {
+    for (int i = 0; i < 10; ++i) {
+        volatile float ratio = g_multifilter_hz[i + 1] / g_multifilter_hz[i];
+        g_multifilter_log2_step[i] = log2f(ratio);
+    }
+    g_multifilter_steps_ready = 1;
+}
+
 static float multifilter_process(const sf_engine_voice_t *voice,
                                  const sf_engine_params_t *params, float input) {
     /* MiniFreak Multi Filter's 14 mode/slope combinations, selected by Shape
@@ -2200,52 +3176,87 @@ static float multifilter_process(const sf_engine_voice_t *voice,
      * Notch12/24/36, so the slope is steepest at both ends of the low and
      * high-pass runs. */
     if (!voice->multifilter_states || !voice->multifilter_lp6) return input;
-    int mode = (int)(sf_clampf(params->shape, 0.0f, 1.0f) * 13.0f + 0.5f);
-    float wpos = sf_clampf(params->wave, 0.0f, 1.0f) * 10.0f;
-    int wi = wpos >= 10.0f ? 9 : (int)wpos;
-    float cutoff = g_multifilter_hz[wi]
-                 * engine_exp2f((wpos - (float)wi)
-                                * log2f(g_multifilter_hz[wi + 1] / g_multifilter_hz[wi]));
-    float resonance = sf_clampf(params->timbre, 0.0f, 1.0f) * 0.95f;
-    float g = engine_fast_svf_g(cutoff);
-    if (mode == 3 || mode == 4) {
-        float alpha = 1.0f - expf(-SF_TWO_PI * cutoff / SF_SAMPLE_RATE);
-        *voice->multifilter_lp6 += alpha * (input - *voice->multifilter_lp6);
-        return mode == 3 ? *voice->multifilter_lp6
-                         : input - *voice->multifilter_lp6;
+    /* The coefficients only move with the knobs, so they are worked out when
+     * those change (see sf_multifilter_cache_t). */
+    sf_multifilter_cache_t local, *c = voice->multifilter_cache;
+    if (!c) {
+        local = (sf_multifilter_cache_t){0};
+        c = &local;
     }
+    int wave_moved = !c->valid || c->wave != params->wave;
+    int knobs_moved = !c->valid || c->timbre != params->timbre || c->shape != params->shape;
+    if (wave_moved) {
+        c->wave = params->wave;
+        float wpos = sf_clampf(params->wave, 0.0f, 1.0f) * 10.0f;
+        int wi = wpos >= 10.0f ? 9 : (int)wpos;
+        if (!g_multifilter_steps_ready) multifilter_build_steps();
+        c->cutoff = g_multifilter_hz[wi]
+                  * engine_exp2f((wpos - (float)wi) * g_multifilter_log2_step[wi]);
+        c->g = engine_fast_svf_g(c->cutoff);
+    }
+    if (knobs_moved) {
+        c->timbre = params->timbre;
+        c->shape = params->shape;
+        int mode = (int)(sf_clampf(params->shape, 0.0f, 1.0f) * 13.0f + 0.5f);
+        float resonance = sf_clampf(params->timbre, 0.0f, 1.0f) * 0.95f;
+        int filter_mode;
+        int stages;
+        if (mode <= 2) {
+            filter_mode = FILTER_LP;
+            stages = 3 - mode;
+        } else if (mode <= 7) {
+            filter_mode = FILTER_HP;
+            stages = mode - 4;
+        } else if (mode <= 10) {
+            filter_mode = FILTER_BP;
+            stages = mode - 7;
+        } else {
+            filter_mode = FILTER_NOTCH;
+            stages = mode - 10;
+        }
+        if (stages < 1) stages = 1;
+        if (stages > 3) stages = 3;
+        /* sf_filter_process carries the main VCF's passband loss with Resonance;
+         * the Multi Filter's passband stays at 0 dB, so each stage undoes it. In
+         * the cascaded modes every stage resonates, at 0.8 of the knob: MiniFreak
+         * V's resonant 36 dB low-pass peaks at +3 / +16 / +21 dB for Timbre 0.5 /
+         * 0.75 / 1, against +3 / +9 / +14 for the 12 dB one. */
+        float stage_res = stages > 1 ? 0.8f * resonance : resonance;
+        c->mode = mode;
+        c->filter_mode = filter_mode;
+        c->stages = stages;
+        c->stage_res = stage_res;
+        if (mode != 3 && mode != 4) {
+            float pb = sf_filter_passband(&voice->multifilter_states[0], stage_res);
+            c->makeup = 1.0f / ((1.0f + 0.32f * stage_res) * pb);
+        }
+    }
+    if (wave_moved || knobs_moved) {
+        if (c->mode == 3 || c->mode == 4)
+            c->alpha = 1.0f - expf(-SF_TWO_PI * c->cutoff / SF_SAMPLE_RATE);
+        else if (knobs_moved)
+            c->coefs_ok = sf_filter_coefs(&voice->multifilter_states[0], c->g, c->stage_res,
+                                          &c->coefs);
+        else if (c->coefs_ok)
+            c->coefs_ok = sf_filter_coefs_g(&c->coefs, c->g);
+    }
+    c->valid = 1;
 
-    int filter_mode;
-    int stages;
-    if (mode <= 2) {
-        filter_mode = FILTER_LP;
-        stages = 3 - mode;
-    } else if (mode <= 7) {
-        filter_mode = FILTER_HP;
-        stages = mode - 4;
-    } else if (mode <= 10) {
-        filter_mode = FILTER_BP;
-        stages = mode - 7;
-    } else {
-        filter_mode = FILTER_NOTCH;
-        stages = mode - 10;
+    if (c->mode == 3 || c->mode == 4) {
+        *voice->multifilter_lp6 += c->alpha * (input - *voice->multifilter_lp6);
+        return c->mode == 3 ? *voice->multifilter_lp6
+                            : input - *voice->multifilter_lp6;
     }
-    if (stages < 1) stages = 1;
-    if (stages > 3) stages = 3;
-    /* sf_filter_process carries the main VCF's passband loss with Resonance;
-     * the Multi Filter's passband stays at 0 dB, so each stage undoes it. In
-     * the cascaded modes every stage resonates, at 0.8 of the knob: MiniFreak
-     * V's resonant 36 dB low-pass peaks at +3 / +16 / +21 dB for Timbre 0.5 /
-     * 0.75 / 1, against +3 / +9 / +14 for the 12 dB one. */
-    float stage_res = stages > 1 ? 0.8f * resonance : resonance;
-    /* stage_res stays below 0.95, so this is the very loss the first stage
-     * applies, and sharing its cache keeps the powf calls off the sample. */
-    float pb = sf_filter_passband(&voice->multifilter_states[0], stage_res);
-    float makeup = 1.0f / ((1.0f + 0.32f * stage_res) * pb);
     float out = input;
-    for (int stage = 0; stage < stages; ++stage)
-        out = sf_filter_process(&voice->multifilter_states[stage], filter_mode,
-                                g, stage_res, out) * makeup;
+    if (c->coefs_ok) {
+        for (int stage = 0; stage < c->stages; ++stage)
+            out = sf_filter_process_coefs(&voice->multifilter_states[stage], c->filter_mode,
+                                          &c->coefs, out) * c->makeup;
+    } else {
+        for (int stage = 0; stage < c->stages; ++stage)
+            out = sf_filter_process(&voice->multifilter_states[stage], c->filter_mode,
+                                    c->g, c->stage_res, out) * c->makeup;
+    }
     return out;
 }
 
@@ -2257,15 +3268,34 @@ static float surgeon_process(const sf_engine_voice_t *voice,
     sf_filter_state_t *state = voice->filter_state ? voice->filter_state
                                                     : other->filter_state;
     if (!state) return input;
-    float cutoff = 20.0f * engine_exp2f(sf_clampf(params->wave, 0.0f, 1.0f) * 9.813781f);
-    float g = engine_fast_svf_g(cutoff);
-    float spread = sf_clampf(params->timbre, 0.0f, 1.0f);
-    float resonance = 0.08f + spread * spread * 0.84f;
-    int mode = (int)(sf_clampf(params->shape, 0.0f, 1.0f) * 3.0f + 0.5f);
-    int filter_mode = mode == 0 ? FILTER_LP
-                    : mode == 1 ? FILTER_BP
-                    : mode == 2 ? FILTER_HP : FILTER_NOTCH;
-    return sf_filter_process(state, filter_mode, g, resonance, input);
+    sf_surgeon_cache_t local, *c = voice->surgeon_cache;
+    if (!c) {
+        local = (sf_surgeon_cache_t){0};
+        c = &local;
+    }
+    int wave_moved = !c->valid || c->wave != params->wave;
+    int knobs_moved = !c->valid || c->timbre != params->timbre || c->shape != params->shape;
+    if (wave_moved) {
+        c->wave = params->wave;
+        float cutoff = 20.0f * engine_exp2f(sf_clampf(params->wave, 0.0f, 1.0f) * 9.813781f);
+        c->g = engine_fast_svf_g(cutoff);
+    }
+    if (knobs_moved) {
+        c->timbre = params->timbre;
+        c->shape = params->shape;
+        float spread = sf_clampf(params->timbre, 0.0f, 1.0f);
+        c->resonance = 0.08f + spread * spread * 0.84f;
+        int mode = (int)(sf_clampf(params->shape, 0.0f, 1.0f) * 3.0f + 0.5f);
+        c->filter_mode = mode == 0 ? FILTER_LP
+                       : mode == 1 ? FILTER_BP
+                       : mode == 2 ? FILTER_HP : FILTER_NOTCH;
+        c->coefs_ok = sf_filter_coefs(state, c->g, c->resonance, &c->coefs);
+    } else if (wave_moved && c->coefs_ok) {
+        c->coefs_ok = sf_filter_coefs_g(&c->coefs, c->g);
+    }
+    c->valid = 1;
+    return c->coefs_ok ? sf_filter_process_coefs(state, c->filter_mode, &c->coefs, input)
+                       : sf_filter_process(state, c->filter_mode, c->g, c->resonance, input);
 }
 
 #define SF_PHASER_MIX 0.5f
@@ -2282,30 +3312,56 @@ static float phaser_process(const sf_engine_voice_t *voice,
     /* MiniFreak Phaser Filter: Wave = cutoff, Timbre = feedback, Shape selects
      * 2..12 poles. Osc 2 Volume provides the dry/wet mix outside this function. */
     if (!voice->apf) return input;
-    float freq = 20.0f * engine_exp2f(
-        sf_clampf(params->wave, 0.0f, 1.0f) * 9.813781f);
-    float g = engine_fast_svf_g(freq);
-    /* First-order all-pass (z^-1 - a) / (1 - a z^-1): its phase passes -90
-     * degrees at freq when a = (1 - g) / (1 + g). */
-    float a = sf_clampf((1.0f - g) / (1.0f + g), -0.999f, 0.999f);
-    float timbre = sf_clampf(params->timbre, 0.0f, 1.0f);
-    float feedback = SF_PHASER_FB * timbre;
-    int pairs = 1 + (int)(sf_clampf(params->shape, 0.0f, 1.0f) * 5.0f + 0.5f);
-    int stages = pairs * 2;
+    sf_phaser_cache_t local, *c = voice->phaser_cache;
+    if (!c) {
+        local = (sf_phaser_cache_t){0};
+        c = &local;
+    }
+    int wave_moved = !c->valid || c->wave != params->wave;
+    int knobs_moved = !c->valid || c->timbre != params->timbre || c->shape != params->shape;
+    if (wave_moved) {
+        c->wave = params->wave;
+        float freq = 20.0f * engine_exp2f(
+            sf_clampf(params->wave, 0.0f, 1.0f) * 9.813781f);
+        float g = engine_fast_svf_g(freq);
+        /* First-order all-pass (z^-1 - a) / (1 - a z^-1): its phase passes -90
+         * degrees at freq when a = (1 - g) / (1 + g). */
+        c->a = sf_clampf((1.0f - g) / (1.0f + g), -0.999f, 0.999f);
+    }
+    if (knobs_moved) {
+        c->timbre = params->timbre;
+        c->shape = params->shape;
+        float timbre = sf_clampf(params->timbre, 0.0f, 1.0f);
+        float feedback = SF_PHASER_FB * timbre;
+        int pairs = 1 + (int)(sf_clampf(params->shape, 0.0f, 1.0f) * 5.0f + 0.5f);
+        c->stages = pairs * 2;
+        c->now = (1.0f - SF_PHASER_FB_PREV) * feedback;
+        c->feedback_prev = SF_PHASER_FB_PREV * feedback;
+        c->out_gain = sqrtf(sqrtf(1.0f - feedback));
+    }
+    float a = c->a;
+    int stages = c->stages;
 
     /* The chain's output is fed back into its input with a fraction of a
      * sample of delay: 45 % last sample's output, 55 % this one's, which is
      * solved in closed form since each stage is -a x + s, so the chain is
-     * G x + T with G = a^stages. */
-    float gain = 1.0f, offset = 0.0f;
-    for (int stage = 0; stage < stages; ++stage) {
-        offset = -a * offset + voice->apf[stage];
-        gain *= -a;
+     * G x + T with G = a^stages. G only moves with the knobs, so it is kept
+     * in the cache's denominator. */
+    float offset = 0.0f;
+    if (wave_moved || knobs_moved) {
+        float gain = 1.0f;
+        for (int stage = 0; stage < stages; ++stage) {
+            offset = -a * offset + voice->apf[stage];
+            gain *= -a;
+        }
+        c->denominator = 1.0f - c->now * gain;
+        c->valid = 1;
+    } else {
+        for (int stage = 0; stage < stages; ++stage)
+            offset = -a * offset + voice->apf[stage];
     }
     float previous = voice->apf_fb ? *voice->apf_fb : 0.0f;
-    float now = (1.0f - SF_PHASER_FB_PREV) * feedback;
-    float x = (input + SF_PHASER_FB_PREV * feedback * previous + now * offset)
-            / (1.0f - now * gain);
+    float x = (input + c->feedback_prev * previous + c->now * offset) / c->denominator;
     float y = x;
     for (int stage = 0; stage < stages; ++stage) {
         float out = -a * y + voice->apf[stage];
@@ -2315,36 +3371,85 @@ static float phaser_process(const sf_engine_voice_t *voice,
     if (voice->apf_fb) *voice->apf_fb = sf_clampf(y, -4.0f, 4.0f);
     /* A phaser: the all-pass chain summed with its own input, which is what
      * cuts the notches (one per two stages, measured on MiniFreak V). */
-    return SF_PHASER_MIX * (x + y) * sqrtf(sqrtf(1.0f - feedback));
+    return SF_PHASER_MIX * (x + y) * c->out_gain;
 }
 
 static float destroy_process(const sf_engine_voice_t *voice,
                              const sf_engine_params_t *params, float input) {
     /* Wavefolder -> decimator -> bit crusher, in the manual's knob order:
-     * Wave = Fold, Timbre = Decimate, Shape = BitCrush. */
+     * Wave = Fold, Timbre = Decimate, Shape = BitCrush. Only the samples the
+     * decimator holds are folded. */
     if (!voice->sh_hold || !voice->sh_count) return input;
-    float fold_amount = sf_clampf(params->wave, 0.0f, 1.0f);
-    float decimate = sf_clampf(params->timbre, 0.0f, 1.0f);
-    float folded = fold_sample_biased(input, fold_amount, 0.0f);
-
-    unsigned period = 1u + (unsigned)(decimate * decimate * 63.0f);
     if (*voice->sh_count == 0u) {
-        *voice->sh_hold = folded;
-        *voice->sh_count = period;
+        float fold_amount = sf_clampf(params->wave, 0.0f, 1.0f);
+        float decimate = sf_clampf(params->timbre, 0.0f, 1.0f);
+        *voice->sh_hold = fold_sample_biased(input, fold_amount, 0.0f);
+        *voice->sh_count = 1u + (unsigned)(decimate * decimate * 63.0f);
     }
     --(*voice->sh_count);
     float out = *voice->sh_hold;
     int bits = 16 - (int)(sf_clampf(params->shape, 0.0f, 1.0f) * 12.0f);
     if (bits < 4) bits = 4;
     float levels = (float)(1u << (bits - 1));
-    return roundf(out * levels) / levels;
+    return roundf(out * levels) * engine_pow2_neg(bits - 1);
 }
 
 /* Position / width / tone voice shared by both oscillators' Wavetable types.
  * `width` is the duty of the first half-cycle (0.5 leaves the table untouched);
  * `tone` is a centred one-pole low-pass / high-pass (0.5 is unfiltered). */
+static float wavetable_voice_sample_cached(int table, float position, float width, float tone,
+                                           const sf_engine_voice_t *voice,
+                                           sf_wavetable_cache_t *c) {
+    int knobs = !c->valid || c->kind != 1 || c->table != table || c->wave != position
+             || c->timbre != width || c->shape != tone;
+    if (knobs) {
+        c->kind = 1;
+        c->table = table;
+        c->wave = position;
+        c->timbre = width;
+        c->shape = tone;
+        if (table < 0) table = 0;
+        if (table >= SF_WT_FAMILY_COUNT) table = SF_WT_FAMILY_COUNT - 1;
+        position = sf_clampf(position, 0.0f, 1.0f);
+        width = sf_clampf(width, 0.0f, 1.0f);
+        float duty = 0.5f + (width - 0.5f) * 0.9f;
+        c->duty = duty;
+        c->rise = 0.5f / duty;
+        c->fall = 0.5f / (1.0f - duty);
+        wavetable_position((float)table, position, &c->pos);
+        tone = sf_clampf(tone, 0.0f, 1.0f);
+        c->filter = 0;
+        if (!(fabsf(tone - 0.5f) < 0.002f)) {
+            float cutoff = tone < 0.5f
+                ? 20.0f * engine_exp2f(tone * 2.0f * 9.813781f)
+                : 20.0f * engine_exp2f((tone - 0.5f) * 2.0f * 9.813781f);
+            float g = engine_fast_svf_g(cutoff);
+            c->alpha = g / (1.0f + g);
+            c->filter = tone < 0.5f ? 1 : 2;
+        }
+    }
+    if (knobs || c->increment != voice->increment) {
+        c->increment = voice->increment;
+        c->level = wavetable_level(voice->increment);
+    }
+    c->valid = 1;
+    float duty = c->duty;
+    float phase = voice->phase;
+    if (phase < duty) phase = phase * c->rise;
+    else phase = 0.5f + (phase - duty) * c->fall;
+    float sample = wavetable_sample_at(&c->pos, c->level, phase);
+
+    if (!voice->filter_state || c->filter == 0) return sample;
+    voice->filter_state->low += c->alpha * (sample - voice->filter_state->low);
+    return c->filter == 1 ? voice->filter_state->low
+                          : sample - voice->filter_state->low;
+}
+
 static float wavetable_voice_sample(int table, float position, float width, float tone,
                                     const sf_engine_voice_t *voice) {
+    if (voice->wavetable_cache)
+        return wavetable_voice_sample_cached(table, position, width, tone, voice,
+                                             voice->wavetable_cache);
     if (table < 0) table = 0;
     if (table >= SF_WT_FAMILY_COUNT) table = SF_WT_FAMILY_COUNT - 1;
     position = sf_clampf(position, 0.0f, 1.0f);
@@ -2417,18 +3522,35 @@ static float two_op_fm_sample(const sf_engine_params_t *params,
      * modulator by 0.25 fb^2 cycles. The modulator keeps its own phase
      * (stack_phase[0]); stack_phase[1] holds the previous output. */
     (void)modulator;
-    float rpos = sf_clampf(params->wave, 0.0f, 1.0f) * 128.0f;
-    int ra = (int)rpos;
-    if (ra > 127) ra = 127;
-    float rblend = rpos - (float)ra;
-    float ratio_semi = plaits_lut_fm_frequency_quantizer[ra]
-        + (plaits_lut_fm_frequency_quantizer[ra + 1]
-           - plaits_lut_fm_frequency_quantizer[ra]) * rblend;
-    float ratio = engine_exp2f(ratio_semi / 12.0f);
-    float t = sf_clampf(params->timbre, 0.0f, 1.0f);
-    float amount = 2.0f * t * t;
-    float feedback = 2.0f * sf_clampf(params->shape, 0.0f, 1.0f) - 1.0f;
-    float fb2 = feedback * feedback;
+    /* The ratio, index and feedback only move with the knobs. */
+    sf_fm_cache_t local, *c = carrier->fm_cache;
+    if (!c) {
+        local = (sf_fm_cache_t){0};
+        c = &local;
+    }
+    if (!c->valid || c->wave != params->wave || c->timbre != params->timbre
+        || c->shape != params->shape) {
+        c->wave = params->wave;
+        c->timbre = params->timbre;
+        c->shape = params->shape;
+        float rpos = sf_clampf(params->wave, 0.0f, 1.0f) * 128.0f;
+        int ra = (int)rpos;
+        if (ra > 127) ra = 127;
+        float rblend = rpos - (float)ra;
+        float ratio_semi = plaits_lut_fm_frequency_quantizer[ra]
+            + (plaits_lut_fm_frequency_quantizer[ra + 1]
+               - plaits_lut_fm_frequency_quantizer[ra]) * rblend;
+        c->ratio = engine_exp2f(ratio_semi / 12.0f);
+        float t = sf_clampf(params->timbre, 0.0f, 1.0f);
+        c->amount = 2.0f * t * t;
+        c->feedback = 2.0f * sf_clampf(params->shape, 0.0f, 1.0f) - 1.0f;
+        c->fb2 = c->feedback * c->feedback;
+        c->valid = 1;
+    }
+    float ratio = c->ratio;
+    float amount = c->amount;
+    float feedback = c->feedback;
+    float fb2 = c->fb2;
 
     float *state = carrier->stack_phase;
     if (!state) {
@@ -2462,10 +3584,7 @@ static float two_op_fm_sample(const sf_engine_params_t *params,
 #define SF_FMRM_RING_SWING 1.16f
 #define SF_FMRM_COMPARATOR_GAIN 16.0f
 
-static float fm_rm_wave_sample(float phase, float increment, float wave) {
-    float position = sf_clampf(wave, 0.0f, 1.0f) * 3.0f;
-    int segment = position >= 3.0f ? 2 : (int)position;
-    float blend = position - (float)segment;
+static float fm_rm_wave_sample(float phase, float increment, int segment, float blend) {
     float tri_phase = phase + 0.25f;
     if (tri_phase >= 1.0f) tri_phase -= 1.0f;
     float saw_phase = phase + 0.5f;
@@ -2490,13 +3609,31 @@ static float fm_rm_wave_sample(float phase, float increment, float wave) {
 
 static float fm_rm_sample(const sf_engine_params_t *params,
                           const sf_engine_voice_t *oscillator2, float modulator) {
-    float timbre = sf_clampf(params->timbre, 0.0f, 1.0f);
-    float shape = sf_clampf(params->shape, 0.0f, 1.0f);
-    float phase = oscillator2->phase + SF_FMRM_PM_INDEX * timbre * modulator;
+    /* The depth, ring amount and wave segment only move with the knobs. */
+    sf_fmrm_cache_t local, *c = oscillator2->fmrm_cache;
+    if (!c) {
+        local = (sf_fmrm_cache_t){0};
+        c = &local;
+    }
+    if (!c->valid || c->wave != params->wave || c->timbre != params->timbre
+        || c->shape != params->shape) {
+        c->wave = params->wave;
+        c->timbre = params->timbre;
+        c->shape = params->shape;
+        float timbre = sf_clampf(params->timbre, 0.0f, 1.0f);
+        float shape = sf_clampf(params->shape, 0.0f, 1.0f);
+        c->pm = SF_FMRM_PM_INDEX * timbre;
+        /* Ring amount against Shape, fitted to the sideband levels. */
+        c->ring = (0.74f + 0.26f * shape) * shape;
+        float position = sf_clampf(params->wave, 0.0f, 1.0f) * 3.0f;
+        c->segment = position >= 3.0f ? 2 : (int)position;
+        c->blend = position - (float)c->segment;
+        c->valid = 1;
+    }
+    float phase = oscillator2->phase + c->pm * modulator;
     phase -= floorf(phase);
-    float osc = fm_rm_wave_sample(phase, oscillator2->increment, params->wave);
-    /* Ring amount against Shape, fitted to the sideband levels. */
-    float ring = (0.74f + 0.26f * shape) * shape;
+    float osc = fm_rm_wave_sample(phase, oscillator2->increment, c->segment, c->blend);
+    float ring = c->ring;
     float square = sf_clampf(-modulator * SF_FMRM_COMPARATOR_GAIN, -1.0f, 1.0f);
     float gain = 1.0f - ring + ring * (SF_FMRM_RING_DC + SF_FMRM_RING_SWING * square);
     return osc * gain;
@@ -2513,7 +3650,8 @@ float sf_engine1_sample(const sf_engine_params_t *params,
     case OSC_FOLD: {
         float source = standard_wave_sample(carrier->phase, carrier->increment,
                                             params->wave * 0.65f);
-        return fold_sample_biased(source, params->timbre, (params->shape - 0.5f) * 1.4f);
+        return fold_sample_cached(carrier->fold_cache, source, params->timbre,
+                                  (params->shape - 0.5f) * 1.4f);
     }
     case OSC_NOISE:
         return minifreak_noise_sample(carrier, params);
@@ -2668,9 +3806,11 @@ float sf_engine2_mix(const sf_engine_params_t *params,
     case ENGINE_CRUSHER: {
         int bits = 16 - (int)(params->wave * 12.0f);
         if (bits < 4) bits = 4;
+        if (bits > 16) bits = 16;   /* a Wave below 0 would shift past the word */
         float levels = (float)(1u << (bits - 1));
         float drive = 1.0f + params->timbre * 8.0f;
-        float crushed = roundf((input * drive + (params->shape - 0.5f) * 0.1f) * levels) / levels;
+        float crushed = roundf((input * drive + (params->shape - 0.5f) * 0.1f) * levels)
+                      * engine_pow2_neg(bits - 1);
         if (raw2_out) *raw2_out = crushed;
         return input * (1.0f - oscillator2_level) + crushed * oscillator2_level;
     }
@@ -2681,7 +3821,8 @@ float sf_engine2_mix(const sf_engine_params_t *params,
         return input + input * raw2 * oscillator2_level * params->timbre * 2.0f;
     case ENGINE_FOLD: {
         float fold_input = input * (0.5f + params->wave * 2.0f);
-        raw2 = fold_sample_biased(fold_input, params->timbre, (params->shape - 0.5f) * 1.4f);
+        raw2 = fold_sample_cached(oscillator2->fold_cache, fold_input, params->timbre,
+                                  (params->shape - 0.5f) * 1.4f);
         RAW2_OUT();
         return input * (1.0f - oscillator2_level) + raw2 * oscillator2_level;
     }
@@ -2708,4 +3849,5 @@ int sf_engine2_uses_delay(int type) {
 void sf_engines_init(void) {
     if (!g_harmo_amp_ready) harmo_build_table();
     if (!g_chord_wt_ready) chord_wavetable_init();
+    if (!g_multifilter_steps_ready) multifilter_build_steps();
 }

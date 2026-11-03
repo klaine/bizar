@@ -15,7 +15,10 @@
 #define SF_SEQ_LAYERS 6
 #define SF_SEQ_HELD 16
 #define SF_SEQ_SOUNDING 32
-#define SF_SEQ_EVENTS 32
+/* The most one sample can emit: every sounding note running out, then a
+ * Chord arp's held keys each retriggered (off), making room (off) and
+ * started (on). A dropped note-off would leave a voice hanging. */
+#define SF_SEQ_EVENTS (SF_SEQ_SOUNDING + 3 * SF_SEQ_HELD)
 #define SF_SEQ_ROOT_NOTE 60
 #define SF_SEQ_DIV_COUNT 15
 #define SF_SEQ_DATA_MAX 5120

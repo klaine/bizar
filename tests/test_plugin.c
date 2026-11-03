@@ -2655,6 +2655,237 @@ static void test_host_transport_lfo(void) {
     move_plugin_init_v2(NULL);
 }
 
+/* Fills the stack below the caller with NaN, so a local the render block
+ * reads before writing shows up as NaN rather than as a plausible leftover. */
+__attribute__((noinline)) static float poison_stack(void) {
+    volatile float junk[16384];
+    for (int i = 0; i < 16384; ++i) junk[i] = NAN;
+    return junk[0];
+}
+
+__attribute__((noinline)) static void render_poisoned(plugin_api_v2_t *api, void *instance) {
+    int16_t block[256];
+    (void)poison_stack();
+    api->render_block(instance, block, 128);
+}
+
+/* The arpeggiator starts notes mid-block on voices that were idle when the
+ * block began. Their Cycling Envelope steps were left unset, and a Run-mode
+ * envelope never resets, so a NaN there stayed in the voice for good. */
+static void test_seq_note_gets_cycle_steps(void) {
+    plugin_api_v2_t *api = move_plugin_init_v2(NULL);
+    void *instance = api->create_instance("", NULL);
+    assert(instance != NULL);
+    api->set_param(instance, "cycle_mode", "Run");
+    api->set_param(instance, "seq_mode", "1");
+    api->set_param(instance, "seq_div", "13");
+    midi3(api, instance, 0x90, 60, 100);
+    char text[256];
+    for (int i = 0; i < 400; ++i) {
+        render_poisoned(api, instance);
+        read_value(api, instance, "mod_sources", text, sizeof(text));
+        assert(strstr(text, "nan") == NULL && strstr(text, "inf") == NULL);
+    }
+    api->destroy_instance(instance);
+}
+
+/* A state blob leaves out a default Shaper extension and an empty sequencer,
+ * so recalling one must reset them, not keep the previous patch's. */
+static void test_state_recall_resets_omitted_sections(void) {
+    plugin_api_v2_t *api = move_plugin_init_v2(NULL);
+    void *init = api->create_instance("", NULL);
+    static char blob[65536];
+    read_value(api, init, "state", blob, sizeof(blob));
+    assert(strstr(blob, "lfo1_shp_mode") == NULL && strstr(blob, "seq_mode") == NULL);
+    api->destroy_instance(init);
+
+    void *instance = api->create_instance("", NULL);
+    api->set_param(instance, "lfo1_shp_mode", "1");
+    api->set_param(instance, "lfo1_shp_steps", "5");
+    api->set_param(instance, "lfo2_shp_curve12", "0.9");
+    api->set_param(instance, "seq_mode", "1");
+    api->set_param(instance, "seq_data", "60.100.0,64.100.0");
+    api->set_param(instance, "state", blob);
+    char value[64];
+    read_value(api, instance, "lfo1_shp_mode", value, sizeof(value));
+    assert(strcmp(value, "0") == 0);
+    read_value(api, instance, "lfo1_shp_steps", value, sizeof(value));
+    assert(strcmp(value, "8") == 0);
+    read_value(api, instance, "lfo2_shp_curve12", value, sizeof(value));
+    assert(strcmp(value, "0.5") == 0);
+    read_value(api, instance, "seq_mode", value, sizeof(value));
+    assert(strcmp(value, "0") == 0);
+    read_value(api, instance, "seq_data", value, sizeof(value));
+    assert(strchr(value, '6') == NULL);
+    api->destroy_instance(instance);
+}
+
+/* Switching a slot from Reverb to Delay used to read the reverb's lines (the
+ * start of the shared ring) back as echoes. With nothing playing, the Delay
+ * must stay silent. The switch lands where the 1 s read sweeps that region. */
+static void test_reverb_to_delay_switch_is_clean(void) {
+    plugin_api_v2_t *api = move_plugin_init_v2(NULL);
+    void *instance = api->create_instance("", NULL);
+    api->set_param(instance, "fx1_type", "Reverb");
+    api->set_param(instance, "fx1_mix", "0.5");
+    midi3(api, instance, 0x90, 48, 120);
+    render_blocks(api, instance, 20);
+    midi3(api, instance, 0x80, 48, 0);
+    render_blocks(api, instance, 290);
+    char value[16];
+    read_value(api, instance, "polyphony", value, sizeof(value));
+    assert(strcmp(value, "0") == 0);
+    api->set_param(instance, "fx1_type", "Delay");
+    api->set_param(instance, "fx1_subtype", "0");
+    api->set_param(instance, "fx1_time", "1000");
+    api->set_param(instance, "fx1_feedback", "0");
+    api->set_param(instance, "fx1_mix", "1");
+    int16_t block[256];
+    long long energy = 0;
+    for (int i = 0; i < 360; ++i) {
+        api->render_block(instance, block, 128);
+        for (int s = 0; s < 256; ++s) energy += (long long)block[s] * block[s];
+    }
+    assert(energy == 0);
+    api->destroy_instance(instance);
+}
+
+static sf_voice_start_params_t mono_params(unsigned *age, int env_retrig) {
+    sf_voice_start_params_t p = {VOICE_MONO, 0.0f, 0.0f, CYCLE_ENV, 1, 0, 0,
+                                 env_retrig, age, SF_MAX_VOICES, 0u, -1};
+    return p;
+}
+
+/* Mono with Env Reset: a legato note fades the sounding one out (3 ms, as a
+ * steal does) instead of cutting it to 0, restarts its envelope from zero,
+ * and still glides from the old pitch. Env Continue carries the envelope. */
+static void test_mono_env_reset_legato(void) {
+    sf_env_shape_t attack, decay;
+    float attack_ms = sf_env_shape_setup(&attack, ENV_ATTACK, ENV_CURVE_DEFAULT, 1.0f);
+    float decay_ms = sf_env_shape_setup(&decay, ENV_DECAY, ENV_CURVE_DEFAULT, 50.0f);
+    float attack_step = 1.0f / (attack_ms * 0.001f * 44100.0f);
+    float decay_step = 0.3f / (decay_ms * 0.001f * 44100.0f);
+    for (int retrig = 0; retrig < 2; ++retrig) {
+        unsigned age = 0;
+        sf_voice_t voice;
+        memset(&voice, 0, sizeof(voice));
+        sf_voice_start_params_t p = mono_params(&age, retrig);
+        sf_voice_start(&voice, 0, 48, 100, 0, 0, &p);
+        for (int s = 0; s < 8000; ++s)
+            sf_voice_envelope_sample(&voice, attack_step, decay_step, 0.7f, &attack, &decay);
+        float held = voice.last_env_out;
+        float old_hz = voice.current_hz;
+        assert(fabsf(held - 0.7f) < 1e-3f);
+        sf_voice_start(&voice, 0, 60, 100, 0, 1, &p);
+        if (retrig) {
+            /* Env Continue: the envelope carries on and the pitch glides. */
+            assert(!voice.steal_pending && voice.note == 60);
+            assert(voice.current_hz == old_hz && voice.target_hz > 2.0f * old_hz - 1.0f);
+            continue;
+        }
+        assert(voice.steal_pending && voice.note == 48);
+        float previous = held;
+        int s = 0;
+        for (; s < 400 && voice.note != 60; ++s) {
+            float out = sf_voice_envelope_sample(&voice, attack_step, decay_step, 0.7f,
+                                                 &attack, &decay);
+            assert(out <= previous && previous - out < 0.01f);
+            previous = out;
+        }
+        assert(voice.note == 60 && voice.env_stage == ENV_ATTACK && voice.env == 0.0f);
+        assert(s > 100 && s < 160);   /* about 3 ms */
+        assert(voice.current_hz == old_hz && voice.target_hz > 2.0f * old_hz - 1.0f);
+    }
+
+    /* Through the plugin: releasing the new key during that fade, with the
+     * old one still held, goes back to the old note instead of leaving the
+     * new one sounding; releasing the old key lets the new one start. */
+    plugin_api_v2_t *api = move_plugin_init_v2(NULL);
+    for (int release_new = 0; release_new < 2; ++release_new) {
+        void *instance = api->create_instance("", NULL);
+        api->set_param(instance, "voice_mode", "Mono");
+        api->set_param(instance, "env_retrig", "Env Reset");
+        midi3(api, instance, 0x90, 48, 100);
+        render_blocks(api, instance, 20);
+        midi3(api, instance, 0x90, 60, 100);
+        midi3(api, instance, 0x80, release_new ? 60 : 48, 0);
+        render_blocks(api, instance, 4);
+        char value[64];
+        read_value(api, instance, "sounding_notes", value, sizeof(value));
+        assert(strcmp(value, release_new ? "48" : "60") == 0);
+        api->destroy_instance(instance);
+    }
+}
+
+/* Scenes write an enum as its index; the LFO divisions only took names. */
+static void test_lfo_div_accepts_index(void) {
+    plugin_api_v2_t *api = move_plugin_init_v2(NULL);
+    void *instance = api->create_instance("", NULL);
+    char value[64];
+    api->set_param(instance, "lfo1_div", "4");
+    read_value(api, instance, "lfo1_div", value, sizeof(value));
+    assert(strcmp(value, "4 Bar") == 0);
+    api->set_param(instance, "lfo2_div", "13.000000");
+    read_value(api, instance, "lfo2_div", value, sizeof(value));
+    assert(strcmp(value, "1/2") == 0);
+    api->set_param(instance, "lfo2_div", "1/8T");
+    read_value(api, instance, "lfo2_div", value, sizeof(value));
+    assert(strcmp(value, "1/8T") == 0);
+    api->set_param(instance, "lfo2_div", "1/64");   /* no such name: ignored */
+    read_value(api, instance, "lfo2_div", value, sizeof(value));
+    assert(strcmp(value, "1/8T") == 0);
+    api->set_param(instance, "lfo1_div", "99");
+    read_value(api, instance, "lfo1_div", value, sizeof(value));
+    assert(strcmp(value, "1/32T") == 0);
+    api->destroy_instance(instance);
+}
+
+/* Wavetable's width warp can round the last phase before 1 up to 1.0, which
+ * must read sample 0 again rather than one past the frame (past the whole
+ * bank, for the last table). */
+static void test_wavetable_phase_wraps(void) {
+    for (int table = 0; table < SF_WT_FAMILY_COUNT; ++table) {
+        sf_engine_params_t params = {OSC_WAVETABLE, 1.0f, 1.0f, 0.5f, table};
+        sf_engine_voice_t start, end;
+        memset(&start, 0, sizeof(start));
+        start.increment = 0.45f;
+        end = start;
+        end.phase = nextafterf(1.0f, 0.0f);
+        assert(sf_engine1_sample(&params, &end, &end) == sf_engine1_sample(&params, &start, &start));
+    }
+}
+
+/* A pattern holding more notes than the sequencer tracks (32) must still end
+ * every note it starts. */
+static void test_seq_note_overflow(void) {
+    sf_seq_t seq;
+    sf_seq_init(&seq);
+    seq.mode = SEQ_MODE_SEQ;
+    seq.division = 13;
+    char data[SF_SEQ_DATA_MAX];
+    int len = 0;
+    for (int step = 0; step < 16; ++step) {
+        if (step) data[len++] = ',';
+        for (int k = 0; k < SF_SEQ_LAYERS; ++k)
+            len += snprintf(data + len, sizeof(data) - (size_t)len, "%s%d.100.20",
+                            k ? "+" : "", 20 + step * SF_SEQ_LAYERS + k);
+    }
+    sf_seq_set_data(&seq, data);
+    sf_seq_key_down(&seq, 60, 100);
+    int sounding[128] = {0};
+    int max_events = 0;
+    sf_seq_event_t ev[SF_SEQ_EVENTS];
+    for (int s = 0; s < 44100 * 4; ++s) {
+        int n = sf_seq_advance(&seq, 120.0f, 44100.0f, ev, SF_SEQ_EVENTS);
+        if (n > max_events) max_events = n;
+        for (int i = 0; i < n; ++i) sounding[ev[i].note] += ev[i].on ? 1 : -1;
+    }
+    assert(max_events < SF_SEQ_EVENTS);
+    int n = sf_seq_panic(&seq, ev, SF_SEQ_EVENTS);
+    for (int i = 0; i < n; ++i) sounding[ev[i].note] += ev[i].on ? 1 : -1;
+    for (int note = 0; note < 128; ++note) assert(sounding[note] == 0);
+}
+
 int main(void) {
     test_api_and_param_contract();
     test_device_page_layout();
@@ -2694,6 +2925,13 @@ int main(void) {
     test_keyboard_chord_and_unison_modes();
     test_sustain_pedal();
     test_host_transport_lfo();
+    test_seq_note_gets_cycle_steps();
+    test_state_recall_resets_omitted_sections();
+    test_reverb_to_delay_switch_is_clean();
+    test_mono_env_reset_legato();
+    test_lfo_div_accepts_index();
+    test_wavetable_phase_wraps();
+    test_seq_note_overflow();
     puts("Bizar plugin tests passed");
     return 0;
 }

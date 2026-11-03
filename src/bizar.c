@@ -1515,6 +1515,20 @@ static int parse_osc2_type(const char *value) {
     return parse_enum(value, g_osc2_modes, SF_OSC2_MODE_COUNT);
 }
 
+/* An LFO division by name or, as Scenes write enums, by index ("4" or
+ * "4.000000"). The names start with digits ("1/2", "8 Bar"), so a number only
+ * counts when nothing follows it; anything else leaves `current` alone. */
+static int parse_lfo_div(const char *value, int current) {
+    for (int i = 0; i < SF_LFO_DIV_COUNT; ++i)
+        if (strcmp(value, g_lfo_divs[i].name) == 0) return i;
+    char *end = NULL;
+    double index = strtod(value, &end);
+    if (end == value || *end != '\0' || !isfinite(index)) return current;
+    if (index < 0.0) return 0;
+    if (index >= (double)(SF_LFO_DIV_COUNT - 1)) return SF_LFO_DIV_COUNT - 1;
+    return (int)index;
+}
+
 static int parse_fx_type(const char *value) {
     if (value && strcmp(value, "EQ") == 0) return FX_EQ;
     return parse_enum(value, g_fx_types, FX_TYPE_COUNT);
@@ -1905,7 +1919,13 @@ static void release_note_ex(sf_instance_t *inst, int note, int channel, int key)
         if (inst->held_count > 0) {
             int top = inst->held_count - 1;
             const sf_voice_t *v = &inst->voices[0];
-            if (v->active && v->key == note && v->channel == channel) {
+            /* The key the stack plays: while a fade is in progress, the
+             * one waiting to start, not the one fading out. */
+            int playing = v->steal_pending
+                ? (v->steal_params.key >= 0 ? v->steal_params.key : v->steal_note)
+                : v->key;
+            int playing_channel = v->steal_pending ? v->steal_channel : v->channel;
+            if (v->active && playing == note && playing_channel == channel) {
                 start_note_voices(inst, inst->held_note[top], inst->held_vel[top],
                                   inst->held_chan[top], 1);
             }
@@ -2698,14 +2718,8 @@ static void set_param_value(sf_instance_t *inst, const char *key, const char *va
     else if (strcmp(key, "glide_mode") == 0) inst->glide_mode = parse_enum(value, g_glide_modes, 2);
     else if (strcmp(key, "unison_mode") == 0) inst->unison_mode = parse_enum(value, g_unison_modes, 2);
     else if (strcmp(key, "chord") == 0) inst->chord = parse_enum(value, g_off_on, 2);
-    else if (strcmp(key, "lfo1_div") == 0) {
-        for (int i = 0; i < SF_LFO_DIV_COUNT; ++i)
-            if (strcmp(value, g_lfo_divs[i].name) == 0) { inst->lfo1_div = i; return; }
-    }
-    else if (strcmp(key, "lfo2_div") == 0) {
-        for (int i = 0; i < SF_LFO_DIV_COUNT; ++i)
-            if (strcmp(value, g_lfo_divs[i].name) == 0) { inst->lfo2_div = i; return; }
-    }
+    else if (strcmp(key, "lfo1_div") == 0) inst->lfo1_div = parse_lfo_div(value, inst->lfo1_div);
+    else if (strcmp(key, "lfo2_div") == 0) inst->lfo2_div = parse_lfo_div(value, inst->lfo2_div);
     else {
         int slot, field;
         if (parse_fx_param_key(key, &slot, &field)) {
@@ -2886,6 +2900,12 @@ static void migrate_route_grid(sf_instance_t *inst, const char *json) {
 
 static void apply_state_json(sf_instance_t *inst, const char *json) {
     json_index_build(&inst->json_ix, json);
+    /* The state writer leaves out a default Shaper extension and an empty
+     * sequencer, so a blob without those keys means the defaults, not
+     * whatever the instance last held. */
+    sf_shaper_default(&inst->lfo1_shaper);
+    sf_shaper_default(&inst->lfo2_shaper);
+    seq_reset_patch(inst);
 #define RESTORE(name) do { float v; if (json_number(inst, json, #name, &v)) set_numeric_param(inst, #name, v); } while (0)
     float state_version = 0.0f;
     if (!json_number(inst, json, "version", &state_version)) state_version = 0.0f;
@@ -3859,13 +3879,13 @@ static void sf_render_block(void *instance, int16_t *out, int frames) {
     }
     /* Rise, Fall and Hold can be modulated per voice, so each voice gets its
      * own steps. Env mode runs Rise/Fall as an ADSR's attack, decay and
-     * release. */
+     * release. Idle voices get theirs too: the sequencer can start a note
+     * on one mid-block, and it reads these straight away. */
     float cycle_rise_step[SF_MAX_VOICES];
     float cycle_fall_step[SF_MAX_VOICES];
     float cycle_hold_arg[SF_MAX_VOICES];
     sf_cycle_env_t cycle_env[SF_MAX_VOICES];
     for (int i = 0; i < SF_MAX_VOICES; ++i) {
-        if (!inst->voices[i].active) continue;
         cycle_rise_step[i] = 1.0f / (cycle_rise_voice[i] * 0.001f * SF_SAMPLE_RATE);
         cycle_fall_step[i] = 1.0f / (cycle_fall_voice[i] * 0.001f * SF_SAMPLE_RATE);
         cycle_hold_arg[i] = inst->cycle_mode == CYCLE_ENV

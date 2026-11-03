@@ -209,7 +209,10 @@ static void voice_start_now(sf_voice_t *voice, int index, int note, int velocity
 void sf_voice_start(sf_voice_t *voice, int index, int note, int velocity,
                     int channel, int legato,
                     const sf_voice_start_params_t *params) {
-    if (!legato && voice->active && (voice->steal_pending
+    /* Env Reset restarts a legato note's envelope from zero too, which would
+     * cut an audible voice dead, so it takes the same fade. */
+    int restart = !legato || params->env_retrig == 0;
+    if (restart && voice->active && (voice->steal_pending
                                      || voice->last_env_out > 0.001f)) {
         /* Stealing an audible voice: fade it out first, start afterwards. */
         int was_pending = voice->steal_pending;
@@ -218,6 +221,7 @@ void sf_voice_start(sf_voice_t *voice, int index, int note, int velocity,
         voice->steal_velocity = velocity;
         voice->steal_channel = channel;
         voice->steal_index = index;
+        voice->steal_legato = legato;
         voice->steal_params = *params;
         voice->steal_sustained = 0;
         if (!was_pending) {
@@ -287,10 +291,15 @@ static void voice_start_now(sf_voice_t *voice, int index, int note, int velocity
     voice->lfo2_snh.hold = voice->lfo1_snh.hold;
     voice->lfo2_snh.slew = voice->lfo2_snh.hold;
     voice->target_hz = voice->base_note_hz * voice->unison_ratio;
-    if (!legato || params->env_retrig == 0 || voice->current_hz <= 0.0f) {
+    int first = voice->current_hz <= 0.0f;
+    /* A legato note glides from where the voice is, whichever way the
+     * envelope retriggers. */
+    if (!legato || first) {
         voice->current_hz = voice->target_hz;
         voice->glide_target_hz = voice->target_hz;
         voice->glide_ratio = 1.0f;
+    }
+    if (!legato || params->env_retrig == 0 || first) {
         voice->env = 0.0f;
         voice->last_env_out = 0.0f;
         voice->env_stage = ENV_ATTACK;
@@ -511,8 +520,8 @@ float sf_voice_envelope_sample(sf_voice_t *voice, float attack_step,
             if (voice->steal_pending) {
                 voice->steal_pending = 0;
                 voice_start_now(voice, voice->steal_index, voice->steal_note,
-                                voice->steal_velocity, voice->steal_channel, 0,
-                                &voice->steal_params);
+                                voice->steal_velocity, voice->steal_channel,
+                                voice->steal_legato, &voice->steal_params);
                 voice->sustained = voice->steal_sustained;
                 voice->steal_sustained = 0;
                 voice->last_env_out = 0.0f;

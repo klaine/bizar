@@ -533,6 +533,7 @@ void sf_effect_state_init(sf_effect_state_t *state,
         state->mix_smooth[slot] = mix[slot];
         state->pos[slot] = 0;
         state->clear_pos[slot] = 0;
+        state->last_type[slot] = FX_OFF;
         state->phase[slot] = 0.0f;
         state->rev_mod_phase[slot] = 0.0f;
         state->peak_frequency_smooth[slot] = peak_frequency[slot];
@@ -714,10 +715,16 @@ void sf_effect_process(sf_effect_state_t *state, int slot, int type, int subtype
     float time_knob = sf_clampf((time_ms - 1.0f) / (SF_FX_TIME_MAX - 1.0f), 0.0f, 1.0f);
     float intensity = sf_clampf(feedback / 0.95f, 0.0f, 1.0f);
 
-    /* Delay storage is cleared incrementally after instance creation and
-     * every preset load. Only the effects that read the ring wait for it. The
+    /* Delay storage is cleared incrementally after instance creation, every
+     * preset load and whenever a slot leaves Reverb, whose lines fill the
+     * start of the ring and would otherwise come back as a Delay's or a
+     * Chorus's echoes. Only the effects that read the ring wait for it. The
      * Reverb clears its own region (below), which the sweep then skips so it
      * never wipes a live room. */
+    if (type != state->last_type[slot]) {
+        if (state->last_type[slot] == FX_REVERB) state->clear_pos[slot] = 0;
+        state->last_type[slot] = type;
+    }
     if (type == FX_REVERB && state->clear_pos[slot] < SF_REV_REGION_END)
         state->clear_pos[slot] = SF_REV_REGION_END;
     if (state->clear_pos[slot] < (unsigned)SF_DELAY_SIZE && reads_delay_ring(type)) {

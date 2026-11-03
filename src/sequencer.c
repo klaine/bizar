@@ -221,12 +221,21 @@ static void seq_start_note(sf_seq_t *seq, sf_seq_event_t *events, int *count,
         --seq->sounding_count;
         break;
     }
-    seq_emit(events, count, max_events, 1, note, velocity);
-    if (seq->sounding_count < SF_SEQ_SOUNDING) {
-        seq->sounding_note[seq->sounding_count] = note;
-        seq->sounding_left[seq->sounding_count] = length_samples < 1.0 ? 1.0 : length_samples;
-        ++seq->sounding_count;
+    if (seq->sounding_count >= SF_SEQ_SOUNDING) {
+        /* Full: end the note closest to its own end, so every note started
+         * here is still tracked and gets its note-off. */
+        int shortest = 0;
+        for (int i = 1; i < seq->sounding_count; ++i)
+            if (seq->sounding_left[i] < seq->sounding_left[shortest]) shortest = i;
+        seq_emit(events, count, max_events, 0, seq->sounding_note[shortest], 0);
+        seq->sounding_note[shortest] = seq->sounding_note[seq->sounding_count - 1];
+        seq->sounding_left[shortest] = seq->sounding_left[seq->sounding_count - 1];
+        --seq->sounding_count;
     }
+    seq_emit(events, count, max_events, 1, note, velocity);
+    seq->sounding_note[seq->sounding_count] = note;
+    seq->sounding_left[seq->sounding_count] = length_samples < 1.0 ? 1.0 : length_samples;
+    ++seq->sounding_count;
 }
 
 static void seq_fire_pattern(sf_seq_t *seq, sf_seq_event_t *events, int *count,

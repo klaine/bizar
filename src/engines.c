@@ -138,8 +138,11 @@ static float minifreak_basic_wave_sample(const sf_engine_params_t *params,
 static float wavetable_frame_sample(int family, int frame, int level, float phase) {
     float sample_pos = phase * (float)SF_WT_SIZE;
     unsigned index = (unsigned)sample_pos;
-    unsigned next = (index + 1u) & (SF_WT_SIZE - 1u);
     float fraction = sample_pos - (float)index;
+    /* The Wavetable width warp can round a phase just below 1 up to 1.0,
+     * which is sample 0 again, not one past the end of the frame. */
+    index &= SF_WT_SIZE - 1u;
+    unsigned next = (index + 1u) & (SF_WT_SIZE - 1u);
     const int16_t *table = sf_wavetable_bank[family][frame][level];
     float a = (float)table[index] * (1.0f / 32768.0f);
     float b = (float)table[next] * (1.0f / 32768.0f);

@@ -4170,7 +4170,13 @@
         function tick() {
           if (document.hidden) { setTimeout(tick, 400); return; }
           Promise.all([remote.getParam(component + ":mod_sources"), remote.getParam(component + ":seq_step")]).then(function (v) {
-            if (v[1] === undefined || v[1] === null || String(v[1]) === "") { liveMode = "sim"; return; }
+            if (v[1] === undefined || v[1] === null || String(v[1]) === "") {
+              /* No seq_step from the start: a module too old for live values.
+               * After real readings an empty one is a dropped read; retry. */
+              if (liveMode !== "real") { liveMode = "sim"; return; }
+              setTimeout(tick, 1000);
+              return;
+            }
             liveMode = "real";
             /* Only a changed reading replaces liveValues, so the paint loop
              * can tell nothing moved and skip the frame. */
@@ -4185,7 +4191,12 @@
             var step = Math.round(Number(v[1]));
             if (step !== lastSeqStep) { lastSeqStep = step; if (sfxApi && sfxApi.setPlayhead) sfxApi.setPlayhead(step); }
             setTimeout(tick, remote.web ? 60 : 150);
-          }, function () { liveMode = "sim"; });
+          }, function () {
+            /* A failed read (a reload, a dropped connection) is retried, so one
+             * error no longer freezes the needles and playhead for good. */
+            if (liveMode !== "real") liveMode = "sim";
+            setTimeout(tick, 1000);
+          });
         }
         tick();
       }

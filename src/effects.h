@@ -65,6 +65,9 @@ typedef struct {
     float comp_env[SF_FX_SLOTS][2][SF_FX_COMP_BANDS];
     unsigned pos[SF_FX_SLOTS];
     unsigned clear_pos[SF_FX_SLOTS];
+    /* The type each slot ran last sample, to catch a switch away from Reverb,
+     * whose lines fill the start of the ring. */
+    int last_type[SF_FX_SLOTS];
     float delay_l[SF_FX_SLOTS][SF_DELAY_SIZE];
     float delay_r[SF_FX_SLOTS][SF_DELAY_SIZE];
     float phase[SF_FX_SLOTS];

@@ -116,6 +116,9 @@ typedef struct {
     int steal_velocity;
     int steal_channel;
     int steal_index;
+    /* The waiting note is legato: an Env Reset retrigger, which fades out
+     * like a steal but keeps the pitch to glide from. */
+    int steal_legato;
     sf_voice_start_params_t steal_params;
     /* Sustain pedal: the key was released while the pedal was down, so the
      * voice holds until the pedal comes up. steal_sustained is the same for

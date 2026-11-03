@@ -2,6 +2,32 @@
 
 ## Unreleased: Bizar
 
+- **Fixed: Mono with Env Reset cut the held note dead and never glided.** A
+  legato note now fades the sounding one out over 3 ms, as a voice steal does,
+  then restarts the envelope from zero, and its pitch glides from the old note
+  as it does with Env Continue. Releasing a key during that fade no longer
+  leaves the wrong note sounding.
+- **Fixed: recalling a saved patch kept the previous patch's Shaper and
+  sequence.** A state with no extended Shaper steps or no sequencer section
+  now resets both, so a Module Preset sounds the same whatever was loaded
+  before it.
+- **Fixed: switching an effect slot from Reverb to Delay played the reverb's
+  insides back as echoes.** The reverb keeps its lines at the start of the
+  slot's delay memory; leaving Reverb now clears it, and Delay, Chorus,
+  Flanger and Super Unison stay dry for the usual 64 ms while it does.
+- **Fixed: notes from the arpeggiator or sequencer could start with an unset
+  Cycling Envelope.** A note started mid-block read its Rise and Fall steps
+  before they were set; in Run mode a bad value stayed in that voice and could
+  mute it whenever the envelope was routed.
+- **Fixed: LFO 1 and LFO 2 Div ignored numbers.** Scenes write an enum as its
+  index, which these two now accept as well as the division's name.
+- **Fixed: a sequence holding more than 32 notes at once left the extra ones
+  without a note-off.** The note nearest its own end is now ended early to make
+  room.
+- **Fixed: Wavetable could read one sample past its table** near the end of a
+  cycle when Timbre narrows the width.
+- **Fixed: the Remote UI's live modulation needles and step playhead froze
+  after one failed read.** They now retry.
 - **Fixed: the effect Preset knob did nothing on Move after a type change.** The
   Preset options are per effect type, but changing the type did not tell Move
   to re-read the parameter list, so the knob kept the previous type's options:

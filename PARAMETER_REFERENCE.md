@@ -1,6 +1,6 @@
 # Bizar parameter reference
 
-Version 0.8.2. Generated from the module's own `ui_hierarchy` and `chain_params` by `scripts/generate_parameter_reference.py`; do not edit by hand.
+Version 0.9.0. Generated from the module's own `ui_hierarchy` and `chain_params` by `scripts/generate_parameter_reference.py`; do not edit by hand.
 
 The Move grid shows up to eight knobs per page. A row marked `shown when` is hidden until the named control reaches that value, so an effect slot shows its EQ controls only while it is running that effect.
 

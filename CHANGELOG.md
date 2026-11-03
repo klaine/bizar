@@ -2,6 +2,8 @@
 
 ## Unreleased: Bizar
 
+## 0.9.0: patch categories and CPU pass
+
 - **Browse by category, on Move and in the Remote UI.** A new Patch Category page lists All and
   the eight categories (Bass, Lead, Keys, Poly, Pad, Pluck, Arp/Seq, FX/Drone); picking one lands
   on Factory Patches, which then jogs through that category only. The Remote UI has a new patch
@@ -135,6 +137,8 @@
 - **Web synth start modal.** The browser build now opens with a centred "Start Bizar"
   modal, like Amino and Crest, instead of a small Start audio button in the top bar.
   Its on-screen keyboard is the model the Amino and Crest web pages now follow.
+## 0.8.2: first public release
+
 - **Additive removed.** The MiniFreak has no such engine: Bizar's Additive was a
   lookup into the harmonic wavetable family, and the MiniFreak's additive sound
   is Harmo. Later Osc 1/Osc 2 type indices shift down one (state version 18);
@@ -232,7 +236,7 @@
   written under `*-personal.*` names so they cannot be published by mistake
   (see `docs/MINIFREAK_IMPORT.md`).
 
-## Unreleased: envelope and LFO parity pass
+## Envelope and LFO parity pass (also in 0.8.2)
 
 The ADSR, Cycling Envelope and both LFOs were measured against MiniFreak V
 (each modulator routed to pitch and tracked, or read off the amp envelope)

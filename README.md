@@ -39,11 +39,19 @@ partition and rename them into place, so a running Schwung is not disturbed.
 
 The signal path is one voice of a classic hybrid synth, six times over:
 
-```
-Osc 1 ──┐
-        ├─ mix ─ Filter (LP/BP/HP) ─ VCA ─┐
-Osc 2 ──┘                                 ├─ Effect 1 ─ Effect 2 ─ Effect 3 ─ out
-   ▲ (can process Osc 1)      other voices ┘
+```mermaid
+flowchart LR
+    subgraph voice [Each voice]
+        O1[Osc 1] --> MIX[Mix]
+        O1 -.->|processor modes| O2[Osc 2]
+        O2 --> MIX
+        O1 -.-> FFM{{Filter FM}}
+        O2 -.-> FFM
+        MIX --> F["Filter (LP / BP / HP)"] --> VCA[VCA]
+        FFM -.-> F
+    end
+    VCA --> SUM((All voices))
+    SUM --> E1[Effect 1] --> E2[Effect 2] --> E3[Effect 3] --> OUT([Out])
 ```
 
 Everything below is reachable from Move's parameter pages, and most of it from the Remote UI

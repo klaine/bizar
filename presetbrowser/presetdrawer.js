@@ -121,8 +121,14 @@ export function presetDrawer(model, host) {
         del.onclick = (e) => { e.stopPropagation(); host.remove(i); };
         row.append(del);
       }
-      row.onclick = () => audition(i);
-      row.ondblclick = () => close(true);
+      // A click on the current, edited preset auditions it as stored; the double click that click
+      // began keeps the sound the drawer opened with, edits and all, rather than the stored one.
+      let asOpened = false;
+      row.onclick = (e) => {
+        if (e.detail <= 1) asOpened = !auditioned && i === host.current() && host.edited();
+        audition(i);
+      };
+      row.ondblclick = () => close(!asOpened);
       list.appendChild(row);
       return { i, row };
     });
@@ -199,7 +205,10 @@ export function presetDrawer(model, host) {
     if (e.key === "Enter" && rows[cursor]) {
       e.preventDefault();
       if (tab) rows[cursor].row.click();
-      else { audition(rows[cursor].i); close(true); }
+      else { // keeps what is playing: the current row, edited or not, isn't loaded again
+        if (rows[cursor].i !== host.current()) audition(rows[cursor].i);
+        close(true);
+      }
     }
   });
   // The scope can change on Move (pb_cat) or from a chip; favourites from a star.

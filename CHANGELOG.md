@@ -2,6 +2,11 @@
 
 ## Unreleased: Bizar
 
+- **The patch browser keeps your edits.** Pressing Enter on the current, edited patch, or
+  double-clicking it, reloaded it as stored, which dropped the edits and their undo history, and
+  Esc could not bring them back. Both now close the browser on the sound as you left it. A single
+  click still auditions the stored patch, and Esc still puts back the sound you had.
+
 ## 0.9.0: patch categories and CPU pass
 
 - **Browse by category, on Move and in the Remote UI.** A new Patch Category page lists All and

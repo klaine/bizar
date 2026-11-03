@@ -9,6 +9,10 @@
       color-scheme: dark; font: 13px/1.4 Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
       --bg:#0e100d; --card:#171915; --card2:#1d201a; --line:#262a22; --line2:#323729;
       --ink:#eef0e8; --dim:#98a08c; --mute:#626858; --lime:#d6ff38; --r:14px;
+      /* the shared patch browser (presetbrowser.css) in Bizar's colours */
+      --pb-bg:var(--card); --pb-field:var(--bg); --pb-raised:var(--card2); --pb-line:var(--line); --pb-line-2:var(--line2);
+      --pb-text:var(--ink); --pb-dim:var(--dim); --pb-faint:var(--mute); --pb-accent:var(--lime); --pb-on-accent:#111;
+      --pb-star:var(--s-env); --pb-radius:9px; --pb-width:560px;
       /* one colour per modulation source: chips, knob rings, matrix cells, envelope previews */
       --s-cyc:#ff8a4c; --s-env:#ffd23f; --s-lfo1:#4cd9ff; --s-lfo2:#7b93ff; --s-vel:#ff5fa2; --s-whl:#b98cff; --s-kbd:#5be3a1;
     }
@@ -30,7 +34,6 @@
     .patch-tools button:hover:not(:disabled), .menu button:hover { border-color:var(--lime); color:var(--lime); }
     .patch-tools button:disabled { opacity:.35; cursor:default; }
     .patch-tools button[aria-pressed=true] { background:var(--lime); color:#111; }
-    .patch .name small .edited { color:var(--s-env); }
     .menu { position:fixed; z-index:60; display:grid; gap:4px; min-width:220px; padding:8px; background:var(--card); border:1px solid var(--line2); border-radius:12px; box-shadow:0 20px 60px #000c; }
     .menu button { text-align:left; }
     .menu input { padding:7px 9px; border:1px solid var(--line2); border-radius:8px; background:var(--bg); }
@@ -40,34 +43,133 @@
     .brand { display:flex; align-items:center; gap:10px; font-weight:800; letter-spacing:.14em; text-transform:uppercase; font-size:12px; }
     .brand-mark { display:grid; place-items:center; width:28px; height:28px; border-radius:9px; background:var(--lime); color:#111; font-weight:900; font-size:12px; letter-spacing:0; }
     h1 { margin:0; font-size:12px; letter-spacing:.14em; text-transform:uppercase; }
+    /* the shared header (presetbrowser.js) in Bizar's patch card: ‹ name over position › */
     .patch { display:flex; align-items:stretch; justify-self:center; width:min(520px,100%); background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; }
-    .patch button { border:0; background:transparent; color:var(--dim); }
-    .patch button:hover { background:#ffffff0a; color:var(--lime); }
-    .patch .step { width:44px; font-size:18px; }
-    .patch .name { flex:1; display:grid; padding:6px 8px; min-width:0; text-align:center; color:var(--ink); }
-    .patch .name b { font-size:15px; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .patch .name small { color:var(--dim); font-size:10px; letter-spacing:.12em; text-transform:uppercase; }
+    .patch .pb-nav { flex:1; gap:0; }
+    .patch .pb-step { width:44px; height:auto; border:0; border-radius:0; background:transparent; font-size:18px; }
+    .patch .pb-step:hover:not(:disabled) { background:#ffffff0a; color:var(--lime); }
+    .patch .pb-name { flex-direction:column-reverse; align-items:center; border:0; border-radius:0; background:transparent; padding:6px 8px; text-align:center; }
+    .patch .pb-name:hover { background:#ffffff0a; }
+    .patch .pb-title { font-size:15px; font-weight:700; }
+    .patch .pb-meta { font:10px/1.3 inherit; letter-spacing:.12em; text-transform:uppercase; }
+    .patch .pb-scope { align-self:center; margin:0 2px; }
+    .patch-wait { flex:1; display:grid; place-items:center; color:var(--dim); font-size:12px; }
     .pill { display:inline-flex; align-items:center; gap:7px; padding:5px 10px; border:1px solid var(--line); border-radius:999px; color:var(--dim); font-size:11px; white-space:nowrap; }
     .pill:before { content:""; width:6px; height:6px; border-radius:50%; background:var(--lime); box-shadow:0 0 8px var(--lime); }
-    #browser { position:fixed; inset:0; z-index:50; display:none; align-items:flex-start; justify-content:center; padding-top:8vh; background:#000b; backdrop-filter:blur(4px); }
-    #browser.open { display:flex; }
-    #browser .sheet { display:grid; grid-template-rows:auto 1fr; width:min(640px,94vw); max-height:78vh; overflow:hidden; background:var(--card); border:1px solid var(--line2); border-radius:16px; box-shadow:0 30px 80px #000c; }
-    #psearch { margin:14px; padding:11px 13px; border-radius:10px; border:1px solid var(--line2); background:var(--bg); outline:none; }
-    #psearch:focus { border-color:var(--lime); }
-    #plist { overflow:auto; border-top:1px solid var(--line); }
-    #plist button { display:flex; justify-content:space-between; width:100%; padding:10px 16px; border:0; border-bottom:1px solid var(--line); background:transparent; text-align:left; }
-    #plist button:hover, #plist button.sel { background:#d6ff3812; }
-    #plist span { color:var(--mute); font-size:11px; font-variant-numeric:tabular-nums; }
-    #plist .row { display:grid; grid-template-columns:minmax(0,1fr) auto; border-bottom:1px solid var(--line); }
-    #plist .row > button:first-child { border-bottom:0; }
-    #plist .row .star, #plist .row .del { width:40px; padding:0; justify-content:center; border-bottom:0; color:var(--mute); }
-    #plist .row .star[aria-pressed=true] { color:var(--s-env); }
-    #plist .row .del:hover { color:#ff6b6b; }
-    #plist button.cur { background:#d6ff3824; outline:1px solid var(--lime); outline-offset:-1px; }
-    #pfilters { display:flex; gap:4px; margin:0 14px 10px; }
-    #pfilters button { border:1px solid var(--line2); border-radius:8px; background:transparent; color:var(--dim); padding:4px 10px; font-size:12px; }
-    #pfilters button[aria-pressed=true] { background:var(--lime); color:#111; border-color:var(--lime); }
-    #plist .empty { padding:14px 16px; }
+
+    /*pb:css*/
+/* Preset browsing shared by the Move modules' Remote UIs (see presetbrowser.js).
+   Layout lives here; the look comes from the --pb-* tokens, which each module
+   sets from its own palette.  The defaults sit in :where() so any module rule
+   wins whatever the load order. */
+:where(:root) {
+  --pb-sheet: 1;              /* presetStyles(): this sheet is already on the page */
+  --pb-bg: #12171c;           /* drawer */
+  --pb-field: #181f26;        /* name button, chips, search */
+  --pb-raised: #1e262e;       /* hovered and cursor rows */
+  --pb-line: #29323b;
+  --pb-line-2: #36414b;
+  --pb-text: #e6ecef;
+  --pb-dim: #8d9ba5;
+  --pb-faint: #5d6a74;
+  --pb-accent: #5fe0bf;       /* the loaded preset, chosen chips */
+  --pb-on-accent: #0b0e11;
+  --pb-star: #f2c94c;
+  --pb-radius: 8px;
+  --pb-mono: ui-monospace, Menlo, Consolas, monospace;
+  --pb-width: 520px;
+}
+
+/* ------------------------------------------------------------ header */
+.pb-nav { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.pb-step {
+  min-width: 32px; height: 32px; border-radius: var(--pb-radius); border: 1px solid var(--pb-line);
+  background: var(--pb-field); color: var(--pb-dim); font-size: 17px; line-height: 1;
+}
+.pb-step:hover:not(:disabled) { color: var(--pb-text); border-color: var(--pb-line-2); }
+.pb-step:disabled { opacity: .35; cursor: default; }
+.pb-name {
+  flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start;
+  padding: 4px 12px; border: 1px solid var(--pb-line); border-radius: var(--pb-radius);
+  background: var(--pb-field); color: var(--pb-text); text-align: left;
+}
+.pb-name:hover { border-color: var(--pb-line-2); }
+.pb-name.pb-custom { padding: 0; align-items: stretch; }  /* host.display draws it */
+.pb-title { font-weight: 650; font-size: 14px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pb-meta { color: var(--pb-dim); font: 10px/1.3 var(--pb-mono); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pb-scope {
+  height: 24px; padding: 0 9px; border-radius: 12px; white-space: nowrap; font-size: 11px; font-weight: 650;
+  border: 1px solid var(--pb-accent); background: color-mix(in srgb, var(--pb-accent) 14%, transparent); color: var(--pb-accent);
+}
+.pb-scope:hover { background: var(--pb-accent); color: var(--pb-on-accent); }
+
+/* ------------------------------------------------------------ drawer */
+.pb-drawer {
+  position: fixed; top: 0; bottom: 0; left: 0; z-index: 40; width: min(var(--pb-width), 100%);
+  display: flex; flex-direction: column; gap: 8px; padding: 12px;
+  background: var(--pb-bg); color: var(--pb-text); border-right: 1px solid var(--pb-line-2);
+  box-shadow: 0 0 40px rgba(0, 0, 0, .55);
+  transform: translateX(-102%); transition: transform .2s ease; visibility: hidden;
+}
+.pb-drawer.open { visibility: visible; transform: none; }
+.pb-back { position: fixed; inset: 0; z-index: 39; background: rgba(0, 0, 0, .45); opacity: 0; pointer-events: none; transition: opacity .2s; }
+.pb-back.open { opacity: 1; pointer-events: auto; }
+.pb-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.pb-heading { margin: 0; font-size: 12px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--pb-dim); }
+.pb-tabs { display: inline-flex; border: 1px solid var(--pb-line); border-radius: var(--pb-radius); overflow: hidden; }
+.pb-tab { border: 0; background: var(--pb-field); color: var(--pb-dim); padding: 6px 10px; font-size: 12px; }
+.pb-tab + .pb-tab { border-left: 1px solid var(--pb-line); }
+.pb-tab.on { background: var(--pb-accent); color: var(--pb-on-accent); font-weight: 650; }
+.pb-done {
+  height: 30px; padding: 0 14px; border-radius: var(--pb-radius); font-weight: 650;
+  border: 1px solid var(--pb-line-2); background: var(--pb-raised); color: var(--pb-text);
+}
+.pb-done:hover { border-color: var(--pb-accent); }
+.pb-search {
+  width: 100%; height: 34px; padding: 0 10px; border-radius: var(--pb-radius);
+  border: 1px solid var(--pb-line); background: var(--pb-field); color: var(--pb-text);
+}
+.pb-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.pb-chips:empty { display: none; }
+.pb-chip {
+  height: 24px; padding: 0 9px; border-radius: 12px; border: 1px solid var(--pb-line); background: var(--pb-field);
+  color: var(--pb-dim); font-size: 11px; white-space: nowrap;
+}
+.pb-chip:hover { color: var(--pb-text); }
+.pb-chip.on { color: var(--pb-on-accent); background: var(--pb-accent); border-color: var(--pb-accent); font-weight: 650; }
+.pb-list { flex: 1; overflow-y: auto; min-height: 0; border-top: 1px solid var(--pb-line); padding-top: 4px; }
+.pb-row {
+  display: grid; grid-template-columns: 34px 22px minmax(0, 1fr) auto; gap: 8px; align-items: center;
+  min-height: 32px; padding: 4px 8px; border-radius: 6px; cursor: pointer; user-select: none;
+}
+.pb-row:has(.pb-del) { grid-template-columns: 34px 22px minmax(0, 1fr) auto 22px; }
+.pb-row:hover, .pb-row.cursor { background: var(--pb-raised); }
+.pb-row.on { background: color-mix(in srgb, var(--pb-accent) 16%, transparent); box-shadow: inset 2px 0 var(--pb-accent); }
+.pb-num { color: var(--pb-faint); font: 11px var(--pb-mono); }
+.pb-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pb-row-note { color: var(--pb-dim); font-size: 10px; white-space: nowrap; }
+.pb-star { border: 0; background: none; color: var(--pb-line-2); font-size: 14px; padding: 0; line-height: 1; }
+.pb-star:hover { color: var(--pb-dim); }
+.pb-star.on { color: var(--pb-star); }
+.pb-del { border: 0; background: none; color: var(--pb-faint); font-size: 15px; padding: 0; line-height: 1; }
+.pb-del:hover { color: var(--pb-text); }
+.pb-foot {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px;
+  color: var(--pb-faint); font: 10px/1.4 var(--pb-mono);
+}
+.pb-tools { flex: 1 0 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-family: system-ui, sans-serif; }
+.pb-tools:empty { display: none; }
+.pb-revert {
+  flex: none; max-width: 55%; height: 26px; padding: 0 10px; border-radius: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  border: 1px solid var(--pb-line-2); background: var(--pb-raised); color: var(--pb-text); font: 11px system-ui, sans-serif;
+}
+.pb-revert:hover { border-color: var(--pb-accent); }
+@media (max-width: 520px) {
+  .pb-row { grid-template-columns: 30px 22px minmax(0, 1fr) auto; min-height: 40px; }
+  .pb-row:has(.pb-del) { grid-template-columns: 30px 22px minmax(0, 1fr) auto 26px; }
+}
+@media (prefers-reduced-motion: reduce) { .pb-drawer, .pb-back { transition: none; } }
+/*pb:css-end*/
 
     /* cards */
     .card { min-width:0; padding:12px 14px; background:var(--card); border:1px solid var(--line); border-radius:var(--r); }
@@ -303,11 +405,7 @@
   <div class="app">
     <header class="topbar">
       <div class="brand"><span class="brand-mark">BZ</span><h1>Bizar</h1></div>
-      <div class="patch">
-        <button class="step" id="patch-prev" type="button" aria-label="Previous patch">‹</button>
-        <button class="name" id="patch-open" type="button" aria-haspopup="dialog"><b id="patch-name">Loading…</b><small id="patch-meta">Patch</small></button>
-        <button class="step" id="patch-next" type="button" aria-label="Next patch">›</button>
-      </div>
+      <div class="patch" id="patch-nav"><span class="patch-wait">Loading…</span></div>
       <div class="patch-tools" id="patch-tools">
         <button type="button" id="patch-init" title="Load the Init patch">Init</button>
         <button type="button" id="undo" title="Undo (Ctrl/Cmd+Z)" aria-label="Undo" disabled>↶</button>
@@ -354,7 +452,6 @@
     </section>
   </div>
 
-  <div id="browser" role="dialog" aria-modal="true" aria-label="Patch browser"><div class="sheet" style="grid-template-rows:auto auto 1fr"><input id="psearch" type="search" placeholder="Search patches… (↑ ↓ to move, Enter to load)" autocomplete="off" aria-controls="plist"><div id="pfilters" role="group" aria-label="Show"><button type="button" data-f="all" aria-pressed="true">All</button><button type="button" data-f="fav" aria-pressed="false">★ Favourites</button><button type="button" data-f="user" aria-pressed="false">My patches</button></div><div id="plist" role="listbox" aria-label="Patches"></div></div></div>
 
   <script src="/static/schwung-remote-api.js"></script>
   <script src="./wavetable-preview.js"></script>
@@ -1243,6 +1340,492 @@
 }());
 </script>
 <!-- sfx:end -->
+  <script>/*pb:js*/
+(function () {
+/* Preset browsing shared by the Move modules' Remote UIs (Amino, Bizar, Crest).
+ *
+ * The canonical copy is Amino's src/web/presetbrowser.js (with presetdrawer.js
+ * and presetbrowser.css); the other modules carry byte-identical copies, the
+ * way Crest FX carries Crest's fx.c.  Behaviour and markup live here.  Each
+ * module styles them through the --pb-* custom properties and talks to its
+ * engine through a host adapter (see presetHeader).
+ *
+ * One model for every surface:
+ * - A library { v: 1, categories: [{id, label}], banks: [{id, label}],
+ *   presets: [{name, cat, bank?}] }.  A preset's id is its index; a preset
+ *   without a bank is in the first one.  A module may add banks of its own
+ *   at run time (saved patches, imported banks) with setLibrary.
+ * - A scope: category, bank and favourites.  The header's ‹ ›, the browser's
+ *   ↑↓ and Move's jog all step through the scope and wrap, so the next preset
+ *   is always one the list shows.
+ * - Browsing auditions: each step loads.  Enter or Done keeps the preset; Esc
+ *   puts back the sound you had when the browser opened, edits included.
+ * - Favourites are keyed "<bank>/<name>", so they survive a reordered bank.
+ */
+
+const LIBRARY_VERSION = 1;
+
+/** Favourites kept in this browser's storage under `key`; in memory if storage is blocked. */
+function storedFavourites(key) {
+  let set = new Set();
+  try { set = new Set(JSON.parse(localStorage.getItem(key) || "[]")); } catch (e) { /* no storage */ }
+  return {
+    has: (k) => set.has(k),
+    toggle(k) {
+      if (set.has(k)) set.delete(k); else set.add(k);
+      try { localStorage.setItem(key, JSON.stringify([...set])); } catch (e) { /* private mode */ }
+    },
+    get size() { return set.size; },
+  };
+}
+
+class BrowseModel {
+  constructor(lib, favourites = storedFavourites("")) {
+    this.favourites = favourites;
+    this.scope = { cat: "", bank: "", fav: false };
+    this.listeners = new Set();
+    this.setLibrary(lib);
+  }
+
+  /** Swap in a changed library (a bank added or removed, a preset saved). */
+  setLibrary(lib) {
+    this.presets = lib.presets || [];
+    this.categories = lib.categories || [];
+    this.banks = lib.banks && lib.banks.length ? lib.banks : [{ id: "", label: "" }];
+    this.firsts = new Map();
+    this.presets.forEach((p, i) => { if (!this.firsts.has(this.bankOf(i))) this.firsts.set(this.bankOf(i), i); });
+    if (this.scope.bank && !this.firsts.has(this.scope.bank)) this.scope.bank = "";
+    this.emit("library");
+  }
+
+  bankOf(i) { return this.presets[i].bank || this.banks[0].id; }
+  /** 1-based number of preset i within its bank, as the bank's own list counts. */
+  number(i) { return i - this.firsts.get(this.bankOf(i)) + 1; }
+  catLabel(id) {
+    const c = this.categories.find((x) => x.id === id);
+    return c ? c.label : id;
+  }
+  bankLabel(id) {
+    const b = this.banks.find((x) => x.id === id);
+    return b ? b.label : id;
+  }
+  favKey(i) { return this.bankOf(i) + "/" + this.presets[i].name; }
+  isFav(i) { return this.favourites.has(this.favKey(i)); }
+  toggleFav(i) {
+    this.favourites.toggle(this.favKey(i));
+    this.emit("fav");
+  }
+
+  inScope(i) {
+    const s = this.scope;
+    if (s.cat && this.presets[i].cat !== s.cat) return false;
+    if (s.bank && this.bankOf(i) !== s.bank) return false;
+    return !s.fav || this.isFav(i);
+  }
+  /** The scope's presets matching `query` (name or category, any case), in bank order. */
+  list(query = "") {
+    const q = query.trim().toLowerCase();
+    const out = [];
+    for (let i = 0; i < this.presets.length; i++) {
+      if (!this.inScope(i)) continue;
+      if (q && !(this.presets[i].name + " " + this.catLabel(this.presets[i].cat)).toLowerCase().includes(q)) continue;
+      out.push(i);
+    }
+    return out;
+  }
+  count(cat) {
+    let n = 0;
+    for (const p of this.presets) if (!cat || p.cat === cat) n++;
+    return n;
+  }
+  /** Presets in bank `id`. */
+  bankCount(id) {
+    let n = 0;
+    for (let i = 0; i < this.presets.length; i++) if (this.bankOf(i) === id) n++;
+    return n;
+  }
+
+  /**
+   * The preset `delta` steps from `from` within the scope, wrapping.  From a
+   * preset outside it, the nearest one in that direction.  -1 when it is empty.
+   */
+  step(from, delta) {
+    const set = this.list();
+    if (!set.length) return -1;
+    const at = set.indexOf(from);
+    if (at >= 0) return set[((at + delta) % set.length + set.length) % set.length];
+    if (delta > 0) return set.find((i) => i > from) ?? set[0];
+    for (let k = set.length - 1; k >= 0; k--) if (set[k] < from) return set[k];
+    return set[set.length - 1];
+  }
+  /** { pos, count }: 1-based position of `i` in the scope (0 when outside it) and the scope's size. */
+  position(i) {
+    const set = this.list();
+    return { pos: set.indexOf(i) + 1, count: set.length };
+  }
+  /** "Bass", "★ Bass", "★ Factory", or "All" for no scope. */
+  scopeLabel() {
+    const s = this.scope;
+    const parts = [];
+    if (s.bank && this.banks.length > 1) parts.push(this.bankLabel(s.bank));
+    if (s.cat) parts.push(this.catLabel(s.cat));
+    const text = parts.join(" · ");
+    return s.fav ? "★" + (text ? " " + text : "") : text || "All";
+  }
+  get scoped() { return !!(this.scope.cat || this.scope.bank || this.scope.fav); }
+
+  setScope(patch) {
+    let changed = false;
+    for (const k in patch) if (this.scope[k] !== patch[k]) { this.scope[k] = patch[k]; changed = true; }
+    if (changed) this.emit("scope");
+  }
+
+  onChange(fn) {
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
+  }
+  emit(what) { for (const fn of this.listeners) fn(what); }
+}
+
+/* ------------------------------------------------------------ DOM */
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+let styled = false;
+function presetStyles() {
+  if (styled) return;
+  styled = true;
+  // A one-file page (Bizar's UI, Amino's single-file build) inlines the sheet,
+  // and its modules may have no URL to resolve one against.
+  if (getComputedStyle(document.documentElement).getPropertyValue("--pb-sheet").trim()) return;
+  const link = document.createElement("link");
+  link.rel = "stylesheet";
+  link.href = new URL("presetbrowser.css", document.baseURI).href;
+  document.head.appendChild(link);
+}
+
+/**
+ * The header control: ‹ name ›, with the scope and position above the name
+ * and a chip that clears the scope.  `host` is the module's adapter:
+ *
+ *   noun, nouns         "preset" or "patch", and its plural (default noun + "s")
+ *   current()           index of the loaded preset, or the last one loaded
+ *                       once the sound is edited; -1 for none
+ *   edited()            true once the sound differs from that preset
+ *   name()              the name to show (the device's preset_name)
+ *   load(i, opts)       load preset i; opts.audition marks a browser step
+ *   begin() / revert()  the browser opened / Esc: put back the sound from begin()
+ *   keep()              the browser closed with the auditioned preset kept
+ *   onChange(fn)        call fn when the preset or name changes elsewhere
+ *
+ * and optionally:
+ *
+ *   status()            the word after the position ("edited", "comparing");
+ *                       by default "edited" while edited()
+ *   display, paint(s)   an element of the module's own to show in the name
+ *                       button (a patch screen, say) in place of the two
+ *                       lines; paint gets { scope, pos, count, status, name }
+ *   views, tools, removable(i), remove(i)   for the drawer (presetdrawer.js)
+ *
+ * Returns the element; `.open()` opens the browser.
+ */
+function presetHeader(model, host) {
+  presetStyles();
+  const noun = host.noun || "preset";
+  const nouns = host.nouns || noun + "s";
+  const wrap = el("div", "pb-nav");
+  const prev = el("button", "pb-step", "‹");
+  const next = el("button", "pb-step", "›");
+  prev.type = next.type = "button";
+  prev.setAttribute("aria-label", "Previous " + noun);
+  next.setAttribute("aria-label", "Next " + noun);
+  const name = el("button", "pb-name");
+  name.type = "button";
+  name.setAttribute("aria-haspopup", "dialog");
+  name.title = "Browse " + nouns;
+  const meta = el("span", "pb-meta");
+  const title = el("span", "pb-title");
+  if (host.display) {
+    name.classList.add("pb-custom");
+    name.append(host.display);
+  } else name.append(meta, title);
+  const scope = el("button", "pb-scope");
+  scope.type = "button";
+  wrap.append(prev, name, scope, next);
+
+  const paint = () => {
+    const i = host.current();
+    const { pos, count } = model.position(i);
+    const status = host.status ? host.status() : i >= 0 && host.edited() ? "edited" : "";
+    const label = host.name() || (i >= 0 ? model.presets[i].name : "Init");
+    if (host.paint) host.paint({ scope: model.scopeLabel(), pos, count, status, name: label });
+    meta.textContent = model.scopeLabel() + " · " + (pos ? pos : "–") + "/" + count + (status ? " · " + status : "");
+    title.textContent = label;
+    prev.disabled = next.disabled = count < 1 || (count === 1 && pos === 1);
+    prev.title = "Previous in " + model.scopeLabel() + " ([)";
+    next.title = "Next in " + model.scopeLabel() + " (])";
+    scope.hidden = !model.scoped;
+    scope.textContent = model.scopeLabel() + " ×";
+    scope.title = "Step through all " + nouns + " again";
+    scope.setAttribute("aria-label", "Clear the " + model.scopeLabel() + " filter");
+  };
+  const step = (d) => {
+    const i = model.step(host.current(), d);
+    if (i >= 0) host.load(i, { audition: false });
+  };
+  prev.onclick = () => step(-1);
+  next.onclick = () => step(1);
+  // [ and ] step as well, in every module's Remote UI.
+  document.addEventListener("keydown", (e) => {
+    if ((e.key !== "[" && e.key !== "]") || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
+    e.preventDefault();
+    step(e.key === "]" ? 1 : -1);
+  });
+  scope.onclick = () => model.setScope({ cat: "", bank: "", fav: false });
+  model.onChange(paint);
+  host.onChange(paint);
+
+  let drawer = null;
+  wrap.open = () => Promise.resolve({ presetDrawer }).then((m) => {
+    drawer = drawer || m.presetDrawer(model, host);
+    drawer.open(name);
+  });
+  name.onclick = wrap.open;
+  paint();
+  return wrap;
+}
+/* The preset browser drawer, shared with presetbrowser.js (see the notes
+ * there).  Loaded on first open.
+ *
+ * Search narrows the scope's list while the drawer is open; the chips set the
+ * scope itself, which outlives the drawer and drives the header's ‹ ›.  A
+ * click or ↑↓ auditions, a double click or Enter keeps, Done keeps, Esc and
+ * "Back to" put back the sound the drawer opened with.  A module may add tabs
+ * of its own (`host.views`): { label, placeholder, rows(query) -> [{ num,
+ * name, note }], pick(row) -> footer text }, an element of controls for the
+ * foot (`host.tools`), and a delete button on the presets it owns
+ * (`host.removable(i)`, `host.remove(i)`).
+ */
+
+function presetDrawer(model, host) {
+  const noun = host.noun || "preset";
+  const nouns = host.nouns || noun + "s";
+  const views = host.views || [];
+  const back = el("div", "pb-back");
+  const panel = el("aside", "pb-drawer");
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-modal", "true");
+  panel.setAttribute("aria-label", noun[0].toUpperCase() + noun.slice(1) + " browser");
+  const head = el("div", "pb-head");
+  const tabs = el("div", "pb-tabs");
+  const tabButtons = [nouns[0].toUpperCase() + nouns.slice(1), ...views.map((v) => v.label)].map((label, k) => {
+    const b = el("button", "pb-tab", label);
+    b.type = "button";
+    b.onclick = () => { tab = k; refresh(); };
+    return b;
+  });
+  if (views.length) tabs.append(...tabButtons);
+  else tabs.append(el("h2", "pb-heading", tabButtons[0].textContent));
+  const done = el("button", "pb-done", "Done");
+  done.type = "button";
+  head.append(tabs, done);
+  const search = el("input", "pb-search");
+  search.type = "search";
+  search.setAttribute("aria-label", "Search");
+  const chips = el("div", "pb-chips");
+  const banks = el("div", "pb-chips pb-banks");
+  const list = el("div", "pb-list");
+  list.setAttribute("role", "listbox");
+  const foot = el("div", "pb-foot");
+  const info = el("span", "pb-info");
+  const revertBtn = el("button", "pb-revert");
+  revertBtn.type = "button";
+  foot.append(info, revertBtn);
+  if (host.tools) {
+    host.tools.classList.add("pb-tools");
+    foot.prepend(host.tools);
+  }
+  panel.append(head, search, chips, banks, list, foot);
+  document.body.append(back, panel);
+
+  let tab = 0;          // 0: the presets; k: views[k - 1]
+  let rows = [];        // [{ i or item, row }] as listed
+  let cursor = -1;      // index into rows
+  let auditioned = false;
+  let openedWith = "";
+  let opener = null;
+
+  const chip = (label, on, onclick, title) => {
+    const b = el("button", "pb-chip" + (on ? " on" : ""), label);
+    b.type = "button";
+    b.setAttribute("aria-pressed", String(on));
+    if (title) b.title = title;
+    b.onclick = onclick;
+    return b;
+  };
+  const drawChips = () => {
+    chips.textContent = "";
+    banks.textContent = "";
+    if (tab) return;
+    const s = model.scope;
+    chips.append(
+      chip("★ Favourites", s.fav, () => model.setScope({ fav: !s.fav })),
+      chip("All " + model.count(""), !s.cat, () => model.setScope({ cat: "" })),
+      ...model.categories.map((c) => chip(c.label + " " + model.count(c.id), s.cat === c.id,
+        () => model.setScope({ cat: s.cat === c.id ? "" : c.id }), c.id)),
+    );
+    if (model.banks.length > 1) {
+      banks.append(chip("All banks", !s.bank, () => model.setScope({ bank: "" })),
+        ...model.banks.map((b) => chip(b.label + " " + model.bankCount(b.id), s.bank === b.id,
+          () => model.setScope({ bank: s.bank === b.id ? "" : b.id }))));
+    }
+  };
+
+  const markCurrent = () => {
+    const cur = host.current();
+    rows.forEach((r, k) => {
+      const on = r.i === cur;
+      r.row.classList.toggle("on", on);
+      r.row.setAttribute("aria-selected", String(on));
+      if (on) cursor = k;
+    });
+    rows.forEach((r, k) => r.row.classList.toggle("cursor", k === cursor));
+    revertBtn.hidden = !auditioned;
+    revertBtn.textContent = "↺ Back to " + (openedWith || "the sound you had");
+  };
+
+  const drawPresets = () => {
+    const cur = host.current();
+    const several = model.banks.length > 1 && !model.scope.bank;
+    rows = model.list(search.value).map((i) => {
+      const p = model.presets[i];
+      const row = el("div", "pb-row");
+      row.setAttribute("role", "option");
+      const fav = model.isFav(i);
+      const star = el("button", "pb-star" + (fav ? " on" : ""), "★");
+      star.type = "button";
+      star.setAttribute("aria-label", (fav ? "Remove " : "Add ") + p.name + (fav ? " from" : " to") + " favourites");
+      star.onclick = (e) => { e.stopPropagation(); model.toggleFav(i); };
+      const note = [p.cat && model.catLabel(p.cat), several && model.bankLabel(model.bankOf(i))].filter(Boolean).join(" · ");
+      row.append(el("span", "pb-num", String(model.number(i)).padStart(3, "0")), star,
+        el("span", "pb-row-name", p.name), el("span", "pb-row-note", note));
+      if (host.removable?.(i)) {
+        const del = el("button", "pb-del", "×");
+        del.type = "button";
+        del.setAttribute("aria-label", "Delete " + p.name);
+        del.onclick = (e) => { e.stopPropagation(); host.remove(i); };
+        row.append(del);
+      }
+      row.onclick = () => audition(i);
+      row.ondblclick = () => close(true);
+      list.appendChild(row);
+      return { i, row };
+    });
+    cursor = rows.findIndex((r) => r.i === cur);
+    info.textContent = rows.length + " of " + model.presets.length + " " + nouns +
+      (model.scoped ? " in " + model.scopeLabel() : "") + " · ↑↓ audition · Enter keep · Esc revert";
+    markCurrent();
+  };
+
+  const drawView = (v) => {
+    rows = v.rows(search.value.trim().toLowerCase()).map((item) => {
+      const row = el("div", "pb-row");
+      row.setAttribute("role", "option");
+      row.append(el("span", "pb-num", item.num || ""), el("span"),
+        el("span", "pb-row-name", item.name), el("span", "pb-row-note", item.note || ""));
+      row.onclick = () => { info.textContent = v.pick(item) || ""; };
+      list.appendChild(row);
+      return { item, row };
+    });
+    cursor = -1;
+    info.textContent = rows.length + " " + (v.unit || "items");
+    revertBtn.hidden = true;
+  };
+
+  const refresh = () => {
+    list.textContent = "";
+    tabButtons.forEach((b, k) => b.classList.toggle("on", k === tab));
+    const v = views[tab - 1];
+    search.placeholder = v ? v.placeholder || "Search" : "Search " + model.list().length + " " + nouns;
+    drawChips();
+    if (v) drawView(v); else drawPresets();
+    rows[cursor]?.row.scrollIntoView({ block: "nearest" });
+  };
+
+  const audition = (i) => {
+    if (i === host.current() && !host.edited()) return markCurrent();
+    host.load(i, { audition: true });
+    auditioned = true;
+    markCurrent();
+  };
+  const revert = () => {
+    if (auditioned) host.revert();
+    auditioned = false;
+    markCurrent();
+    rows[cursor]?.row.scrollIntoView({ block: "nearest" });
+  };
+
+  const isOpen = () => panel.classList.contains("open");
+  const close = (keep) => {
+    if (!isOpen()) return;
+    if (keep) { if (auditioned) host.keep?.(); } else revert();
+    auditioned = false;
+    panel.classList.remove("open");
+    back.classList.remove("open");
+    opener?.focus();
+  };
+  done.onclick = () => close(true);
+  back.onclick = () => close(true);
+  revertBtn.onclick = revert;
+  search.oninput = refresh;
+
+  panel.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); close(false); return; }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      if (!rows.length) return;
+      e.preventDefault();
+      const d = e.key === "ArrowDown" ? 1 : -1;
+      cursor = cursor < 0 ? (d > 0 ? 0 : rows.length - 1) : Math.max(0, Math.min(rows.length - 1, cursor + d));
+      rows.forEach((r, k) => r.row.classList.toggle("cursor", k === cursor));
+      rows[cursor].row.scrollIntoView({ block: "nearest" });
+      if (!tab) audition(rows[cursor].i);
+      return;
+    }
+    if (e.key === "Enter" && rows[cursor]) {
+      e.preventDefault();
+      if (tab) rows[cursor].row.click();
+      else { audition(rows[cursor].i); close(true); }
+    }
+  });
+  // The scope can change on Move (pb_cat) or from a chip; favourites from a star.
+  model.onChange(() => { if (isOpen()) refresh(); });
+  host.onChange(() => { if (isOpen() && !tab) markCurrent(); });
+
+  return {
+    open(from) {
+      opener = from || null;
+      host.begin();
+      openedWith = host.name();
+      auditioned = false;
+      search.value = "";
+      tab = 0;
+      refresh();
+      panel.classList.add("open");
+      back.classList.add("open");
+      search.focus();
+    },
+  };
+}
+
+window.PresetBrowser = { LIBRARY_VERSION, storedFavourites, BrowseModel, el, presetStyles, presetHeader, presetDrawer };
+}());
+/*pb:js-end*/</script>
   <script>
     (function () {
       "use strict";
@@ -4059,7 +4642,6 @@
           closeMenu();
           if (learning) stopLearn();
           arm(null);
-          document.getElementById("browser").classList.remove("open");
         });
       }
 
@@ -4456,7 +5038,6 @@
       }
 
       var userPatches = load("sf-user-patches", []);
-      var favourites = load("sf-favs", []);
       var current = { kind: "factory" };     /* or { kind: "user", name } */
       var baseline = null, patchValues = Object.create(null), edited = false, comparing = null;
       var undoStack = [], redoStack = [], applying = 0, snapshotTimer = 0;
@@ -4534,7 +5115,7 @@
       }
       /* Every write from the panel, the sequencer or the Shaper lands here. */
       function noteChange(key) {
-        if (applying || key === "preset" || key === "state") return;
+        if (applying || key === "preset" || key === "state" || key === "pb_cat") return;
         if (comparing) { comparing = null; }
         clearTimeout(snapshotTimer);
         snapshotTimer = setTimeout(takeSnapshot, 350);
@@ -4602,19 +5183,8 @@
         return current.kind === "user" ? current.name : (option ? option.textContent : "Init");
       }
       function syncPatchUi() {
-        var select = document.getElementById("factory-select");
-        var option = select.options[select.selectedIndex];
-        document.getElementById("patch-name").textContent = current.kind === "user" ? current.name : (option ? option.textContent : "Init");
-        var meta = document.getElementById("patch-meta");
-        meta.textContent = current.kind === "user" ? (current.shared ? "Shared patch" : "My patch")
-          : (option ? String(select.selectedIndex + 1).padStart(3, "0") + " / " + select.options.length : "Patch");
-        if (comparing || edited) {
-          var mark = document.createElement("span");
-          mark.className = "edited";
-          mark.textContent = comparing ? " · comparing original" : " · edited";
-          meta.appendChild(mark);
-        }
         syncHistoryButtons();
+        patchListeners.forEach(function (fn) { fn(); });
       }
       function loadFactory(index) {
         var select = document.getElementById("factory-select");
@@ -4631,115 +5201,118 @@
         baseline = patch.state;
         return applyState(patch.state).then(captureBaseline).then(function () { autosave(baseline); });
       }
-      function stepPatch(delta) {
-        var select = document.getElementById("factory-select");
-        var count = select.options.length;
-        if (count < 2) return;
-        /* From the init patch, next is the first preset and previous the last. */
-        var from = select.selectedIndex < 0 ? (delta > 0 ? -1 : 0) : select.selectedIndex;
-        loadFactory((from + delta + count) % count);
-      }
 
-      /* Browser rows: My patches first, then the factory list; ★ marks favourites. */
-      var browserFilter = "all", browserCursor = 0;
-      function favKey(entry) { return entry.user ? "u:" + entry.name : "f:" + entry.index; }
-      function browserEntries() {
-        var select = document.getElementById("factory-select");
-        var query = document.getElementById("psearch").value.toLowerCase();
-        var out = [];
-        userPatches.forEach(function (patch) { out.push({ user: true, name: patch.name, patch: patch }); });
-        [].forEach.call(select.options, function (option, index) { out.push({ user: false, name: option.textContent, index: index }); });
-        return out.filter(function (entry) {
-          if (query && entry.name.toLowerCase().indexOf(query) < 0) return false;
-          if (browserFilter === "user") return entry.user;
-          if (browserFilter === "fav") return favourites.indexOf(favKey(entry)) >= 0;
-          return true;
+      /* ---------- the patch browser (presetbrowser.js, shared with Amino and Crest) ----------
+       * The library is the factory list (Bizar's bank, then any MiniFreak
+       * import), then My patches as a bank of their own. A patch's category is
+       * its name tag (BA Bass ...), in the order of Move's Patch Category page:
+       * the chips and that page set the same pb_cat. */
+      var PATCH_LIBRARY = /*pb:library*/{"categories": [["BA", "Bass"], ["LD", "Lead"], ["KY", "Keys"], ["PY", "Poly"], ["PD", "Pad"], ["PL", "Pluck"], ["AR", "Arp/Seq"], ["FX", "FX/Drone"]], "factory": 128}/*pb:library-end*/;
+      var patchModel = null, patchListeners = [], visit = null, catSentAt = -Infinity, patchCat = "0";
+      function factoryCount() { return document.getElementById("factory-select").options.length; }
+      function patchLibrary() {
+        var cats = PATCH_LIBRARY.categories, presets = [];
+        var tagged = function (name) {
+          for (var c = 0; c < cats.length; c++) if (name.indexOf(cats[c][0] + " ") === 0) return cats[c][0];
+          return "";
+        };
+        [].forEach.call(document.getElementById("factory-select").options, function (option, index) {
+          var mf = index >= PATCH_LIBRARY.factory;
+          presets.push({ name: option.textContent, cat: mf ? "" : tagged(option.textContent), bank: mf ? "minifreak" : "factory" });
         });
+        userPatches.forEach(function (patch) { presets.push({ name: patch.name, cat: tagged(patch.name), bank: "user" }); });
+        var banks = [{ id: "factory", label: "Bizar" }];
+        if (factoryCount() > PATCH_LIBRARY.factory) banks.push({ id: "minifreak", label: "MiniFreak" });
+        if (userPatches.length) banks.push({ id: "user", label: "My patches" });
+        return { v: 1, banks: banks, presets: presets,
+          categories: cats.map(function (c) { return { id: c[0], label: c[1] }; }) };
       }
-      function closeBrowser() {
-        document.getElementById("browser").classList.remove("open");
-        document.getElementById("patch-open").focus();
-      }
-      function chooseEntry(entry) {
-        closeBrowser();
-        if (entry.user) loadUser(entry.patch); else loadFactory(entry.index);
-      }
-      function listPatches() {
-        var select = document.getElementById("factory-select");
-        var list = document.getElementById("plist");
-        var entries = browserEntries();
-        list.textContent = "";
-        browserCursor = Math.max(0, Math.min(entries.length - 1, browserCursor));
-        if (!entries.length) {
-          list.appendChild(Object.assign(document.createElement("p"), { className: "empty",
-            textContent: browserFilter === "user" ? "No saved patches yet — use Save in the top bar."
-              : browserFilter === "fav" ? "No favourites yet — click ☆ next to a patch." : "No patches match." }));
-          return;
-        }
-        entries.forEach(function (entry, position) {
-          var row = document.createElement("div");
-          row.className = "row";
-          var button = document.createElement("button");
-          button.type = "button";
-          button.setAttribute("role", "option");
-          var isCurrent = entry.user ? current.kind === "user" && current.name === entry.name
-            : current.kind === "factory" && entry.index === select.selectedIndex;
-          if (isCurrent) button.classList.add("sel");
-          if (position === browserCursor) { button.classList.add("cur"); button.setAttribute("aria-selected", "true"); }
-          button.appendChild(document.createTextNode(entry.name));
-          var number = document.createElement("span");
-          number.textContent = entry.user ? "MY" : String(entry.index + 1).padStart(3, "0");
-          button.appendChild(number);
-          button.addEventListener("click", function () { chooseEntry(entry); });
-          row.appendChild(button);
-          var tools = document.createElement("div");
-          tools.style.display = "flex";
-          var star = document.createElement("button");
-          star.type = "button";
-          star.className = "star";
-          var fav = favourites.indexOf(favKey(entry)) >= 0;
-          star.textContent = fav ? "★" : "☆";
-          star.setAttribute("aria-pressed", String(fav));
-          star.setAttribute("aria-label", (fav ? "Remove " : "Add ") + entry.name + (fav ? " from" : " to") + " favourites");
-          star.addEventListener("click", function () {
-            var key = favKey(entry), at = favourites.indexOf(key);
-            if (at >= 0) favourites.splice(at, 1); else favourites.push(key);
-            store("sf-favs", favourites);
-            listPatches();
-          });
-          tools.appendChild(star);
-          if (entry.user) {
-            var del = document.createElement("button");
-            del.type = "button";
-            del.className = "del";
-            del.textContent = "×";
-            del.setAttribute("aria-label", "Delete " + entry.name);
-            del.addEventListener("click", function () {
-              if (!window.confirm("Delete “" + entry.name + "” from My patches?")) return;
-              userPatches = userPatches.filter(function (patch) { return patch.name !== entry.name; });
-              store("sf-user-patches", userPatches);
-              listPatches();
-            });
-            tools.appendChild(del);
+      function refreshPatchLibrary() { if (patchModel) patchModel.setLibrary(patchLibrary()); }
+      /* Favourites were "f:<index>" and "u:<name>"; the shared browser keys them "<bank>/<name>". */
+      function patchFavourites() {
+        try {
+          if (localStorage.getItem("sf-favourites") === null && localStorage.getItem("sf-favs") !== null) {
+            var options = document.getElementById("factory-select").options;
+            store("sf-favourites", load("sf-favs", []).map(function (key) {
+              if (key.indexOf("u:") === 0) return "user/" + key.slice(2);
+              var index = parseInt(key.slice(2), 10), option = options[index];
+              return option ? (index >= PATCH_LIBRARY.factory ? "minifreak/" : "factory/") + option.textContent : "";
+            }).filter(Boolean));
           }
-          row.appendChild(tools);
-          list.appendChild(row);
-        });
-        var cur = list.querySelector("button.cur");
-        if (cur) cur.scrollIntoView({ block: "nearest" });
+        } catch (error) { /* storage blocked */ }
+        return PresetBrowser.storedFavourites("sf-favourites");
       }
-      function openBrowser() {
-        var browser = document.getElementById("browser");
-        browser.classList.add("open");
-        document.getElementById("psearch").value = "";
-        var entries = browserEntries(), select = document.getElementById("factory-select");
-        browserCursor = 0;
-        entries.forEach(function (entry, i) {
-          if (entry.user ? current.kind === "user" && current.name === entry.name
-              : current.kind === "factory" && entry.index === select.selectedIndex) browserCursor = i;
+      function currentPatch() {
+        if (current.kind === "user") {
+          for (var i = 0; i < userPatches.length; i++) if (userPatches[i].name === current.name) return factoryCount() + i;
+          return -1;
+        }
+        return document.getElementById("factory-select").selectedIndex;
+      }
+      /* While the browser is open its auditions make one undo step: each load
+       * pushes one, and the ones before the latest are dropped. */
+      function loadPatch(index, audition) {
+        var n = factoryCount();
+        var done = index < n ? loadFactory(index) : loadUser(userPatches[index - n]);
+        var open = audition ? visit : null;
+        done.then(function () {
+          if (!open || open !== visit) return;
+          undoStack.splice(open.base, Math.max(0, undoStack.length - open.base - 1));
+          syncHistoryButtons();
         });
-        listPatches();
-        document.getElementById("psearch").focus();
+      }
+      function mountPatchNav() {
+        if (patchModel) { refreshPatchLibrary(); return; }
+        patchModel = new PresetBrowser.BrowseModel(patchLibrary(), patchFavourites());
+        var host = {
+          noun: "patch", nouns: "patches",
+          current: currentPatch,
+          edited: function () { return edited || !!comparing; },
+          status: function () { return comparing ? "comparing original" : edited ? "edited" : current.shared ? "shared" : ""; },
+          name: patchName,
+          load: function (index, opts) { if (index !== currentPatch() || edited) loadPatch(index, opts && opts.audition); },
+          begin: function () { visit = { base: undoStack.length, redo: redoStack.slice() }; },
+          keep: function () { visit = null; },
+          revert: function () {
+            if (!visit) return;
+            var entry = undoStack[visit.base - 1];
+            undoStack.length = visit.base;
+            redoStack = visit.redo;
+            visit = { base: visit.base, redo: visit.redo };
+            if (entry) restoreEntry(entry);
+            syncHistoryButtons();
+          },
+          onChange: function (fn) { patchListeners.push(fn); },
+          removable: function (index) { return index >= factoryCount(); },
+          remove: function (index) {
+            var patch = userPatches[index - factoryCount()];
+            if (!patch || !window.confirm("Delete “" + patch.name + "” from My patches?")) return;
+            userPatches = userPatches.filter(function (p) { return p !== patch; });
+            store("sf-user-patches", userPatches);
+            refreshPatchLibrary();
+          },
+        };
+        var nav = PresetBrowser.presetHeader(patchModel, host);
+        var slot = document.getElementById("patch-nav");
+        slot.textContent = "";
+        slot.appendChild(nav);
+        /* Move's Patch Category page and the chips share pb_cat (0 = every patch). */
+        patchModel.onChange(function (what) {
+          if (what !== "scope") return;
+          var n = 0;
+          PATCH_LIBRARY.categories.forEach(function (c, i) { if (c[0] === patchModel.scope.cat) n = i + 1; });
+          if (String(n) === patchCat) return;
+          patchCat = String(n);
+          catSentAt = performance.now();
+          remote.setParam(component + ":pb_cat", patchCat);
+        });
+        remote.getParam(component + ":pb_cat").then(followPatchCategory, function () {});
+      }
+      function followPatchCategory(value) {
+        if (!patchModel || performance.now() - catSentAt < 800) return; /* our own write's older echo */
+        patchCat = String(parseInt(value, 10) || 0);
+        var c = PATCH_LIBRARY.categories[parseInt(value, 10) - 1];
+        patchModel.setScope({ cat: c ? c[0] : "" });
       }
 
       /* ---------- patch menu: save, export, import, share ---------- */
@@ -4782,6 +5355,7 @@
           if (existing) { existing.state = state; existing.saved = Date.now(); }
           else userPatches.unshift({ name: name, state: state, saved: Date.now() });
           store("sf-user-patches", userPatches);
+          refreshPatchLibrary();
           current = { kind: "user", name: name };
           baseline = state; edited = false; comparing = null;
           patchValues = Object.create(null);
@@ -4837,6 +5411,7 @@
             userPatches = userPatches.filter(function (patch) { return patch.name !== name; });
             userPatches.unshift({ name: name, state: json, saved: Date.now() });
             store("sf-user-patches", userPatches);
+            refreshPatchLibrary();
             return loadUser(userPatches[0]).then(function () { toast("Imported “" + name + "” into My patches"); });
           }).catch(function (error) { toast("Import failed: " + error.message); });
         });
@@ -4917,36 +5492,6 @@
       }
 
       function initChrome() {
-        document.getElementById("patch-prev").addEventListener("click", function () { stepPatch(-1); });
-        document.getElementById("patch-next").addEventListener("click", function () { stepPatch(1); });
-        document.getElementById("patch-open").addEventListener("click", openBrowser);
-        document.getElementById("browser").addEventListener("click", function (event) {
-          if (event.target.id === "browser") closeBrowser();
-        });
-        document.getElementById("psearch").addEventListener("input", function () { browserCursor = 0; listPatches(); });
-        document.getElementById("psearch").addEventListener("keydown", function (event) {
-          var entries = browserEntries();
-          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-            event.preventDefault();
-            browserCursor = Math.max(0, Math.min(entries.length - 1, browserCursor + (event.key === "ArrowDown" ? 1 : -1)));
-            listPatches();
-          } else if (event.key === "PageDown" || event.key === "PageUp") {
-            event.preventDefault();
-            browserCursor = Math.max(0, Math.min(entries.length - 1, browserCursor + (event.key === "PageDown" ? 10 : -10)));
-            listPatches();
-          } else if (event.key === "Enter" && entries[browserCursor]) {
-            chooseEntry(entries[browserCursor]);
-          }
-        });
-        [].forEach.call(document.querySelectorAll("#pfilters button"), function (button) {
-          button.addEventListener("click", function () {
-            browserFilter = button.dataset.f;
-            [].forEach.call(document.querySelectorAll("#pfilters button"), function (b) { b.setAttribute("aria-pressed", String(b === button)); });
-            browserCursor = 0;
-            listPatches();
-            document.getElementById("psearch").focus();
-          });
-        });
         var tools = document.getElementById("patch-tools");
         var ab = document.createElement("button");
         ab.type = "button"; ab.id = "patch-compare"; ab.textContent = "A/B"; ab.disabled = true;
@@ -5033,7 +5578,7 @@
           return null;
         }
         function addAll(host, keys, options) { keys.forEach(function (key) { add(host, key, options); }); }
-        var handled = { root: 1, lfo1_curve: 1, lfo2_curve: 1, modmatrix: 1, modmatrix_edit: 1, factory: 1,
+        var handled = { root: 1, lfo1_curve: 1, lfo2_curve: 1, modmatrix: 1, modmatrix_edit: 1, factory: 1, category: 1,
           engine1: 1, engine2: 1, filter: 1, env_vel: 1, envelope: 1, cycle_env: 1, lfo1: 1,
           lfo2: 1, macros: 1, voice: 1, chord: 1, settings: 1, effects: 1, effect2: 1, effect3: 1 };
 
@@ -5338,6 +5883,7 @@
           if (key.indexOf(prefix) === 0) applyValue(key.slice(prefix.length), changed[key]);
           if (key === prefix + "preset")
             setSelectIfKnown(document.getElementById("factory-select"), changed[key]);
+          if (key === prefix + "pb_cat") followPatchCategory(changed[key]);
         });
       });
       window.addEventListener("resize", function () {
@@ -5381,6 +5927,7 @@
           option.textContent = names[index] ? String(names[index]) : "Patch " + (index + 1);
           factorySelect.appendChild(option);
         }
+        mountPatchNav();
         syncPatchUi();
         return remote.getParam(component + ":preset").then(function (value) {
           var option = factorySelect.options[parseInt(value, 10)];

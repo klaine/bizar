@@ -405,6 +405,60 @@ static void test_api_and_param_contract(void) {
     api->destroy_instance(instance);
 }
 
+/* The browse view behind Move's Patch Category and Factory Patches pages. */
+static void test_patch_categories(void) {
+    plugin_api_v2_t *api = move_plugin_init_v2(NULL);
+    void *instance = api->create_instance(".", NULL);
+    static char value[65536]; /* the state is long */
+    static const char *const tags[SF_BROWSE_CAT_COUNT] = {"BA", "LD", "KY", "PY", "PD", "PL", "AR", "FX"};
+    int total = 0, bass = 0;
+    for (int c = 0; c < SF_BROWSE_CAT_COUNT; ++c) {
+        total += g_browse_cats[c].count;
+        if (strcmp(g_browse_cats[c].label, "Bass") == 0) bass = c + 1;
+        for (int i = 0; i < g_browse_cats[c].count; ++i) /* each patch's tag names its category */
+            assert(strncmp(g_factory_names[g_browse_order[g_browse_cats[c].first + i]], tags[c], 2) == 0);
+    }
+    assert(total == SF_ORIGINAL_PRESET_COUNT && bass == 1);
+    read_value(api, instance, "pb_cat", value, sizeof(value));
+    assert(strcmp(value, "0") == 0);
+    read_value(api, instance, "pb_cats", value, sizeof(value));
+    assert(strncmp(value, "[{\"index\":0,\"label\":\"All (", 26) == 0);
+    assert(strstr(value, "{\"index\":1,\"label\":\"Bass (16)\"}") != NULL);
+    /* Nothing loaded yet: no position, so the first step lands on the first patch. */
+    read_value(api, instance, "pb_index", value, sizeof(value));
+    assert(strcmp(value, "-1") == 0);
+    api->set_param(instance, "pb_cat", "4"); /* Poly */
+    read_value(api, instance, "pb_count", value, sizeof(value));
+    assert(atoi(value) == g_browse_cats[3].count);
+    api->set_param(instance, "pb_index", "2");
+    read_value(api, instance, "preset", value, sizeof(value));
+    assert(atoi(value) == g_browse_order[g_browse_cats[3].first + 2]);
+    read_value(api, instance, "preset_name", value, sizeof(value));
+    assert(strncmp(value, "PY ", 3) == 0);
+    read_value(api, instance, "pb_index", value, sizeof(value));
+    assert(strcmp(value, "2") == 0);
+    read_value(api, instance, "state", value, sizeof(value));
+    assert(strstr(value, "pb_") == NULL);
+    /* A state without a preset (a saved patch) keeps the place in the category. */
+    api->set_param(instance, "state", "{\"version\":19,\"preset\":-1}");
+    read_value(api, instance, "pb_index", value, sizeof(value));
+    assert(strcmp(value, "2") == 0);
+    api->set_param(instance, "pb_index", "999");
+    read_value(api, instance, "preset", value, sizeof(value));
+    assert(strcmp(value, "-1") == 0);
+    api->set_param(instance, "pb_cat", "99");
+    read_value(api, instance, "pb_cat", value, sizeof(value));
+    assert(atoi(value) == SF_BROWSE_CAT_COUNT);
+    api->set_param(instance, "pb_cat", "0");
+    api->set_param(instance, "pb_index", "5");
+    read_value(api, instance, "preset", value, sizeof(value));
+    assert(strcmp(value, "5") == 0);
+    read_value(api, instance, "ui_hierarchy", value, sizeof(value));
+    assert(strstr(value, "\"list_param\":\"pb_index\",\"count_param\":\"pb_count\"") != NULL);
+    assert(strstr(value, "\"items_param\":\"pb_cats\",\"select_param\":\"pb_cat\",\"navigate_to\":\"factory\"") != NULL);
+    api->destroy_instance(instance);
+}
+
 static void test_audio_and_voice_lifecycle(void) {
     plugin_api_v2_t *api = move_plugin_init_v2(NULL);
     void *instance = api->create_instance("", "{\"attack\":1,\"decay\":20,\"sustain\":1,\"release\":1,\"output\":1,\"osc2_level\":0,\"stereo\":0}");
@@ -3357,6 +3411,7 @@ static void test_eq_route_takes_effect_at_once(void) {
 
 int main(void) {
     test_api_and_param_contract();
+    test_patch_categories();
     test_device_page_layout();
     test_mod_rate_setting();
     test_audio_and_voice_lifecycle();

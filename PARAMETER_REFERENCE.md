@@ -21,7 +21,11 @@ The Move grid shows up to eight knobs per page. A row marked `shown when` is hid
 
 ### Factory Patches
 
-List page: browses `preset` names from `preset_name`, with `preset_count` entries.
+List page: browses `pb_index` names from `preset_name`, with `pb_count` entries.
+
+### Patch Category
+
+Selector page: lists the items in `pb_cats`, selects with `pb_cat`, and navigates to `factory`.
 
 ### Oscillator 1
 
@@ -488,3 +492,5 @@ Served by the module and used by presets or the Remote UI, but not on a knob pag
 |---|---|---|---|
 | `cycle_rate` | Cycle Rate (legacy) | 0.01 ... 20 Hz |  |
 | `cycle_depth` | Cycle Depth (legacy) | 0 ... 1 |  |
+| `preset` | Factory Patch | 0 ... 127 step 1 |  |
+| `pb_cat` | Patch Category | 0 ... 8 |  |

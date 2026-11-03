@@ -2,6 +2,14 @@
 
 ## Unreleased: Bizar
 
+- **Browse by category, on Move and in the Remote UI.** A new Patch Category page lists All and
+  the eight categories (Bass, Lead, Keys, Poly, Pad, Pluck, Arp/Seq, FX/Drone); picking one lands
+  on Factory Patches, which then jogs through that category only. The Remote UI has a new patch
+  browser, shared with Amino and Crest: category chips (the same choice as the Move page), My
+  patches as a bank of its own, favourites, and search within the category. The header's ‹ › and
+  the `[` `]` keys step within the category. ↑↓ in the browser auditions each patch, Enter keeps
+  it, and Esc puts back the sound you had, edits included. A whole browse is one undo step.
+  Favourites carry over. The category is browsing state only: patches and sets do not save it.
 - **Every engine takes less CPU, most of them 20-50% less.** Each engine now
   keeps the coefficients it works out from its knobs and the pitch, and
   rebuilds them only when those change, as Harmo, Karplus and the Comb already

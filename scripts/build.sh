@@ -24,6 +24,7 @@ GENERATED_DIR="$BUILD_DIR/generated"
 mkdir -p "$BUILD_DIR" "$DIST_DIR" "$GENERATED_DIR"
 PYTHON=${PYTHON:-python3}
 "$PYTHON" "$ROOT/scripts/inline_extras.py"
+"$PYTHON" "$ROOT/scripts/inline_presetbrowser.py"
 if [ ! -f "$GENERATED_DIR/wavetable_bank.h" ] || [ "$ROOT/scripts/generate_wavetables.py" -nt "$GENERATED_DIR/wavetable_bank.h" ]; then
     "$PYTHON" "$ROOT/scripts/generate_wavetables.py" "$GENERATED_DIR/wavetable_bank.h"
 fi

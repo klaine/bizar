@@ -44,6 +44,7 @@ def main():
     host = read(os.path.join(ROOT, "web", "host.js")).replace("__WASM_B64_GZ__", b64)
     preview = read(os.path.join(GEN, "wavetable-preview.js"))
     subprocess.check_call([sys.executable, os.path.join(ROOT, "scripts", "inline_extras.py")])
+    subprocess.check_call([sys.executable, os.path.join(ROOT, "scripts", "inline_presetbrowser.py")])
     html = read(os.path.join(ROOT, "web_ui.html"))
     a = '<script src="/static/schwung-remote-api.js"></script>'
     b = '<script src="./wavetable-preview.js"></script>'

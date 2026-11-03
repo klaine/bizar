@@ -142,7 +142,8 @@ plain saw to start from.
 ## On Move
 
 Bizar's parameter pages, in order: Main (macros, output, cutoff, resonance, attack and release),
-Factory Patches, Oscillator 1, Oscillator 2, Filter, Envelope, Velocity Targets, Cycling
+Factory Patches (it steps through the category that the next page, Patch Category, picks), Patch
+Category, Oscillator 1, Oscillator 2, Filter, Envelope, Velocity Targets, Cycling
 Envelope, LFO 1 and LFO 2 (each with a Curve page for the Shaper), Mod Matrix, Matrix Editor,
 Macros and the four Macro Slots pages, Effect 1 to 3, Voice, Chord and Settings. Each page shows
 up to eight knobs; controls that only apply to the current engine or effect are hidden until it
@@ -152,9 +153,9 @@ and defaults.
 Patches are saved and automated through Schwung like any other module. The **Remote UI**, served
 by Schwung in a browser, adds what a small screen cannot: knobs for everything, draggable
 envelope and Shaper curves, a filter response view, waveform previews, the full modulation
-matrix with hardware-style mod assign, the sequencer editor, undo and redo, user patches with
-favourites, A/B compare, patch export and import, and share links that carry the patch in the
-URL.
+matrix with hardware-style mod assign, the sequencer editor, undo and redo, a patch browser
+with categories, favourites and your own patches, A/B compare, patch export and import, and
+share links that carry the patch in the URL.
 
 ## Playing in the browser
 

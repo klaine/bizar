@@ -45,5 +45,10 @@ The project skills `/build` and `/deploy` in `.claude/skills/` wrap these.
   written by `scripts/generate_*.py` on every build.
 - `web_ui.html` carries `web_ui_extras.js` inlined between the `sfx` markers
   (`scripts/inline_extras.py`). Edit the `.js`, not the inlined block.
+- `web_ui.html` also carries the shared patch browser, inlined between the `pb:` markers by
+  `scripts/inline_presetbrowser.py`, with the category list from `generate_factory_bank.py`.
+  `presetbrowser/` holds byte-identical copies of Amino's `src/web/presetbrowser.js`,
+  `presetdrawer.js` and `presetbrowser.css`: change Amino's, then copy. Bizar's side of it (the
+  library, My patches, undo, `pb_cat`) is the "patch browser" block in `web_ui.html`.
 - `include/` holds the Schwung ABI declarations (so no Schwung checkout is needed).
 - `BACKLOG.md`: features proposed but not started.

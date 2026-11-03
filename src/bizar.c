@@ -36,6 +36,8 @@
  * then the optional MiniFreak bank import (scripts/generate_minifreak_bank.py).
  * SF_MF_PRESET_COUNT is 0 unless a .mnfx export was present at build time. */
 #define SF_FACTORY_PRESET_COUNT (SF_ORIGINAL_PRESET_COUNT + SF_MF_PRESET_COUNT)
+#define SF_STR_(x) #x
+#define SF_STR(x) SF_STR_(x) /* a literal macro (SF_BROWSE_CAT_COUNT) inside a JSON string */
 
 /*
  * Cutoff is a NORMALISED 0..1 log control, not a frequency in Hz.
@@ -263,6 +265,11 @@ typedef struct {
     float channel_pressure[16];
     int last_note;
     int preset_index;
+    /* Move's Patch Category page (pb_cat: 0 = every patch, n = g_browse_cats[n - 1])
+     * and the factory patch loaded last, which browsing continues from once a
+     * state load has cleared preset_index. */
+    int browse_cat;
+    int browse_last;
     /* Preset-change declick: the last output sample, and what is left of it
      * fading out under the new preset (see cut_for_preset_change). */
     float last_out[2];
@@ -1259,7 +1266,10 @@ static int format_chain_params(const sf_instance_t *inst, char *buf, int buf_len
         "{\"key\":\"macro4_amt3\",\"name\":\"Macro 4 Amount 3\",\"type\":\"float\",\"min\":-1,\"max\":1},"
         "{\"key\":\"macro4_dest4\",\"name\":\"Macro 4 Dest 4\",\"type\":\"enum\",\"options\":[\"Off\",\"Pitch\",\"Cut\",\"Shp1\",\"Shp2\",\"Vol2\",\"Res\",\"Out\",\"Tim1\",\"Tim2\",\"Wav1\",\"Wav2\",\"Ptc1\",\"Ptc2\",\"Vol1\",\"VCA\",\"EnvA\",\"Gld\",\"Atk\",\"Dec\",\"Sus\",\"Rel\",\"L1Rt\",\"L2Rt\",\"L1Am\",\"L2Am\",\"CyAm\",\"F1T\",\"F1I\",\"F1A\",\"F2T\",\"F2I\",\"F2A\",\"F3T\",\"F3I\",\"F3A\",\"Mac1\",\"Mac2\",\"Mac3\",\"Mac4\",\"Rise\",\"Fall\",\"Hold\",\"M1:1\",\"M1:2\",\"M1:3\",\"M1:4\",\"M1:5\",\"M1:6\",\"M1:7\",\"M1:8\",\"M1:9\",\"M1:10\",\"M1:11\",\"M1:12\",\"M2:1\",\"M2:2\",\"M2:3\",\"M2:4\",\"M2:5\",\"M2:6\",\"M2:7\",\"M2:8\",\"M2:9\",\"M2:10\",\"M2:11\",\"M2:12\",\"M3:1\",\"M3:2\",\"M3:3\",\"M3:4\",\"M3:5\",\"M3:6\",\"M3:7\",\"M3:8\",\"M3:9\",\"M3:10\",\"M3:11\",\"M3:12\",\"M4:1\",\"M4:2\",\"M4:3\",\"M4:4\",\"M4:5\",\"M4:6\",\"M4:7\",\"M4:8\",\"M4:9\",\"M4:10\",\"M4:11\",\"M4:12\",\"M5:1\",\"M5:2\",\"M5:3\",\"M5:4\",\"M5:5\",\"M5:6\",\"M5:7\",\"M5:8\",\"M5:9\",\"M5:10\",\"M5:11\",\"M5:12\",\"M6:1\",\"M6:2\",\"M6:3\",\"M6:4\",\"M6:5\",\"M6:6\",\"M6:7\",\"M6:8\",\"M6:9\",\"M6:10\",\"M6:11\",\"M6:12\",\"M7:1\",\"M7:2\",\"M7:3\",\"M7:4\",\"M7:5\",\"M7:6\",\"M7:7\",\"M7:8\",\"M7:9\",\"M7:10\",\"M7:11\",\"M7:12\",\"FFM\"]},"
         "{\"key\":\"macro4_amt4\",\"name\":\"Macro 4 Amount 4\",\"type\":\"float\",\"min\":-1,\"max\":1},"
-        "{\"key\":\"preset\",\"name\":\"Factory Patch\",\"type\":\"int\",\"min\":0,\"max\":%s,\"step\":1}"
+        "{\"key\":\"preset\",\"name\":\"Factory Patch\",\"type\":\"int\",\"min\":0,\"max\":%s,\"step\":1},"
+        /* Listed so the Remote UI hears Move's Patch Category choice; the page
+         * that sets it is an items list (ui_hierarchy "category"). */
+        "{\"key\":\"pb_cat\",\"name\":\"Patch Category\",\"type\":\"int\",\"min\":0,\"max\":" SF_STR(SF_BROWSE_CAT_COUNT) "}"
         "]",
         r1->wave_label, r1->wave_short, r1->wave_tip,
         r1->timbre_label, r1->timbre_short, r1->timbre_tip,
@@ -1342,6 +1352,7 @@ static int format_ui_hierarchy(const sf_instance_t *inst, char *buf, int buf_len
         "{\"key\":\"output\",\"short_name\":\"VOL\",\"label\":\"Volume\"},"
         "\"cutoff\",\"resonance\",\"attack\",\"release\","
         "{\"level\":\"factory\",\"label\":\"Factory Patches\"},"
+        "{\"level\":\"category\",\"label\":\"Patch Category\"},"
         "{\"level\":\"engine1\",\"label\":\"Oscillator 1\"},"
         "{\"level\":\"engine2\",\"label\":\"Oscillator 2\"},"
         "{\"level\":\"filter\",\"label\":\"Filter\"},"
@@ -1456,7 +1467,9 @@ static int format_ui_hierarchy(const sf_instance_t *inst, char *buf, int buf_len
         "{\"key\":\"fx3_frequency\",\"short_name\":\"FREQ\",\"label\":\"Peak Freq\",\"visible_if\":{\"param\":\"fx3_type\",\"equals\":\"Peak EQ\"}},"
         "{\"key\":\"fx3_gain\",\"short_name\":\"GAIN\",\"label\":\"Peak Gain\",\"visible_if\":{\"param\":\"fx3_type\",\"equals\":\"Peak EQ\"}},"
         "{\"key\":\"fx3_width\",\"short_name\":\"WIDTH\",\"label\":\"Peak Width\",\"visible_if\":{\"param\":\"fx3_type\",\"equals\":\"Peak EQ\"}}]},"
-        "\"factory\":{\"label\":\"Factory Patches\",\"list_param\":\"preset\",\"count_param\":\"preset_count\",\"name_param\":\"preset_name\",\"navigate_to\":\"root\"}"
+        /* Factory Patches steps through the category Patch Category picks. */
+        "\"factory\":{\"label\":\"Factory Patches\",\"list_param\":\"pb_index\",\"count_param\":\"pb_count\",\"name_param\":\"preset_name\",\"navigate_to\":\"root\"},"
+        "\"category\":{\"label\":\"Patch Category\",\"items_param\":\"pb_cats\",\"select_param\":\"pb_cat\",\"navigate_to\":\"factory\"}"
         "}}",
         r1->wave_short, r1->wave_label,
         r1->timbre_short, r1->timbre_label,
@@ -2377,6 +2390,8 @@ static void initialize_instance(sf_instance_t *inst, int pool_index,
     inst->last_out[0] = inst->last_out[1] = 0.0f;
     inst->declick[0] = inst->declick[1] = 0.0f;
     inst->declick_left = 0;
+    inst->browse_cat = 0;
+    inst->browse_last = -1;
     reset_patch_parameters(inst);
     /* A new instance starts quieter than reset_patch_parameters leaves a
      * preset load (module.json's defaults). */
@@ -3139,7 +3154,49 @@ static void load_factory_preset(sf_instance_t *inst, int index) {
     sf_effect_state_init(&inst->fx_state, inst->fx_mix, inst->fx_eq_db,
                          inst->fx_peak_frequency, inst->fx_peak_gain, inst->fx_peak_width);
     inst->preset_index = index;
+    inst->browse_last = index;
     mark_contract_dirty(inst);
+}
+
+/* The browse view: Move's Factory Patches page steps through the category the
+ * Patch Category page picked (pb_cat), as the Remote UI's header does.
+ * Positions index the category; `preset` stays the absolute patch index. An
+ * imported MiniFreak bank has no categories, so it is only in "all". */
+static int browse_count(const sf_instance_t *inst) {
+    if (inst->browse_cat <= 0) return SF_FACTORY_PRESET_COUNT;
+    return g_browse_cats[inst->browse_cat - 1].count;
+}
+
+static int browse_preset(const sf_instance_t *inst, int pos) {
+    if (inst->browse_cat <= 0) return pos;
+    return g_browse_order[g_browse_cats[inst->browse_cat - 1].first + pos];
+}
+
+static int browse_pos(const sf_instance_t *inst) {
+    int cur = inst->preset_index >= 0 ? inst->preset_index : inst->browse_last;
+    if (cur < 0 || cur >= SF_FACTORY_PRESET_COUNT) return -1;
+    if (inst->browse_cat <= 0) return cur;
+    const sf_browse_cat_t *cat = &g_browse_cats[inst->browse_cat - 1];
+    for (int i = 0; i < cat->count; ++i)
+        if (g_browse_order[cat->first + i] == cur) return i;
+    return -1;
+}
+
+/* [{"index":0,"label":"All (128)"},{"index":1,"label":"Bass (16)"},...] */
+static int format_browse_cats(char *buf, int buf_len) {
+    int written = snprintf(buf, (size_t)buf_len, "[{\"index\":0,\"label\":\"All (%d)\"}",
+                           SF_FACTORY_PRESET_COUNT);
+    if (written < 0 || written >= buf_len) return -1;
+    for (int c = 0; c < SF_BROWSE_CAT_COUNT; ++c) {
+        int n = snprintf(buf + written, (size_t)(buf_len - written), ",{\"index\":%d,\"label\":\"%s (%d)\"}",
+                         c + 1, g_browse_cats[c].label, g_browse_cats[c].count);
+        if (n < 0 || written + n >= buf_len) return -1;
+        written += n;
+    }
+    if (written + 2 >= buf_len) return -1;
+    buf[written++] = ']';
+    buf[written] = '\0';
+    return written;
 }
 
 static void sf_set_param(void *instance, const char *key, const char *value) {
@@ -3150,6 +3207,19 @@ static void sf_set_param(void *instance, const char *key, const char *value) {
         long index = strtol(value, &end, 10);
         if (end != value && index >= 0 && index < SF_FACTORY_PRESET_COUNT)
             load_factory_preset(inst, (int)index);
+        return;
+    }
+    if (strcmp(key, "pb_cat") == 0) {
+        /* Browse state, not sound: the state never carries it. */
+        long cat = strtol(value, NULL, 10);
+        inst->browse_cat = cat < 0 ? 0 : cat > SF_BROWSE_CAT_COUNT ? SF_BROWSE_CAT_COUNT : (int)cat;
+        return;
+    }
+    if (strcmp(key, "pb_index") == 0) {
+        char *end = NULL;
+        long pos = strtol(value, &end, 10);
+        if (end != value && pos >= 0 && pos < browse_count(inst))
+            load_factory_preset(inst, browse_preset(inst, (int)pos));
         return;
     }
     if (strcmp(key, "state") == 0) {
@@ -3225,6 +3295,10 @@ static int sf_get_param(void *instance, const char *key, char *buf, int buf_len)
     }
     if (strcmp(key, "preset_count") == 0) return snprintf(buf, (size_t)buf_len, "%d", SF_FACTORY_PRESET_COUNT);
     if (strcmp(key, "preset") == 0) return snprintf(buf, (size_t)buf_len, "%d", inst->preset_index);
+    if (strcmp(key, "pb_cat") == 0) return snprintf(buf, (size_t)buf_len, "%d", inst->browse_cat);
+    if (strcmp(key, "pb_count") == 0) return snprintf(buf, (size_t)buf_len, "%d", browse_count(inst));
+    if (strcmp(key, "pb_index") == 0) return snprintf(buf, (size_t)buf_len, "%d", browse_pos(inst));
+    if (strcmp(key, "pb_cats") == 0) return format_browse_cats(buf, buf_len);
     if (strcmp(key, "preset_name") == 0) {
         int index = inst->preset_index;
         if (index < 0 || index >= SF_FACTORY_PRESET_COUNT) return write_string(buf, buf_len, "Init");

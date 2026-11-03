@@ -2886,6 +2886,60 @@ static void test_seq_note_overflow(void) {
     for (int note = 0; note < 128; ++note) assert(sounding[note] == 0);
 }
 
+/* Harmo's cached partial weights must sound exactly like rebuilding them every
+ * sample, while Wave and Timbre move and as the pitch changes the count. */
+static void test_harmo_weight_cache(void) {
+    sf_harmo_cache_t cache;
+    memset(&cache, 0, sizeof(cache));
+    float stack_a[SF_SUPERWAVE_COPIES] = {0}, stack_b[SF_SUPERWAVE_COPIES] = {0};
+    sf_engine_voice_t cached, plain;
+    memset(&cached, 0, sizeof(cached));
+    memset(&plain, 0, sizeof(plain));
+    cached.stack_phase = stack_a;
+    cached.harmo_cache = &cache;
+    plain.stack_phase = stack_b;
+    float phase = 0.0f;
+    for (int s = 0; s < 20000; ++s) {
+        float increment = s < 10000 ? 0.002f : 0.03f;
+        /* Held still for runs of samples, then moved, as a knob would be. */
+        float wave = (float)((s / 500) % 7) / 6.0f;
+        float timbre = s % 3000 < 1500 ? 0.2f : 0.2f + (float)(s % 1500) / 1500.0f * 0.6f;
+        sf_engine_params_t params = {OSC_HARMO, wave, timbre, 0.6f, 0};
+        cached.phase = plain.phase = phase;
+        cached.increment = plain.increment = increment;
+        assert(sf_engine1_sample(&params, &cached, &cached)
+               == sf_engine1_sample(&params, &plain, &plain));
+        phase += increment;
+        if (phase >= 1.0f) phase -= 1.0f;
+    }
+}
+
+/* A new note only marks the delay lines stale; each is cleared just before
+ * an engine that uses it runs, and a legato note keeps what is in them. */
+static void test_delay_lines_cleared_on_use(void) {
+    unsigned age = 0;
+    static sf_voice_t voice;
+    memset(&voice, 0, sizeof(voice));
+    sf_voice_start_params_t p = mono_params(&age, 1);
+    sf_voice_start(&voice, 0, 48, 100, 0, 0, &p);
+    for (int i = 0; i < SF_VOICE_DELAY; ++i) voice.delay1[i] = voice.delay2[i] = 0.5f;
+    voice.last_env_out = 0.0f;   /* silent, so the next note starts at once */
+    voice.delay_stale1 = voice.delay_stale2 = 0;
+    sf_voice_start(&voice, 0, 50, 100, 0, 1, &p);
+    assert(!voice.delay_stale1 && !voice.delay_stale2);
+    sf_voice_start(&voice, 0, 52, 100, 0, 0, &p);
+    assert(voice.delay_stale1 && voice.delay_stale2);
+    sf_voice_prepare_delay(&voice, 0, 0);
+    assert(voice.delay1[7] == 0.5f && voice.delay2[7] == 0.5f);
+    sf_voice_prepare_delay(&voice, 0, 1);
+    assert(voice.delay1[7] == 0.5f && voice.delay2[7] == 0.0f && !voice.delay_stale2);
+    sf_voice_prepare_delay(&voice, 1, 1);
+    assert(voice.delay1[SF_VOICE_DELAY - 1] == 0.0f && !voice.delay_stale1);
+    assert(sf_engine1_uses_delay(OSC_KARPLUS) && !sf_engine1_uses_delay(OSC_VA));
+    assert(sf_engine2_uses_delay(ENGINE_COMB) && sf_engine2_uses_delay(ENGINE_KARPLUS)
+           && !sf_engine2_uses_delay(ENGINE_MULTIFILTER));
+}
+
 int main(void) {
     test_api_and_param_contract();
     test_device_page_layout();
@@ -2932,6 +2986,8 @@ int main(void) {
     test_lfo_div_accepts_index();
     test_wavetable_phase_wraps();
     test_seq_note_overflow();
+    test_harmo_weight_cache();
+    test_delay_lines_cleared_on_use();
     puts("Bizar plugin tests passed");
     return 0;
 }

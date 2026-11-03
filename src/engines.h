@@ -161,6 +161,17 @@ typedef struct {
     float coloration_2;
 } sf_speech_state_t;
 
+/* Harmo's partial weights, kept for as long as the knobs and the partial
+ * count that made them hold still: rebuilding them every sample was most of
+ * the engine's cost. count 0 marks it empty. */
+#define SF_HARMO_PARTIALS 40
+typedef struct {
+    float wave;
+    float timbre;
+    int count;
+    float weights[SF_HARMO_PARTIALS];
+} sf_harmo_cache_t;
+
 typedef struct {
     float phase;
     float increment;
@@ -192,6 +203,8 @@ typedef struct {
     float *apf_fb;
     float *sh_hold;
     unsigned *sh_count;
+    /* Harmo's weight cache; NULL rebuilds the weights every sample. */
+    sf_harmo_cache_t *harmo_cache;
 } sf_engine_voice_t;
 
 float sf_engine1_sample(const sf_engine_params_t *params,
@@ -206,6 +219,11 @@ float sf_engine2_mix(const sf_engine_params_t *params,
                      float oscillator1_sample, float oscillator1_level,
                      float oscillator2_level,
                      float *raw2_out);
+
+/* Whether an Osc 1 or Osc 2 mode reads and writes its position's delay line
+ * (delay_buf), which the voice then has to clear before the engine runs. */
+int sf_engine1_uses_delay(int type);
+int sf_engine2_uses_delay(int type);
 
 /* Builds the engines' lookup tables. Call once before rendering so the
  * build never lands on the audio thread. */

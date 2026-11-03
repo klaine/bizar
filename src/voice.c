@@ -365,13 +365,12 @@ static void voice_start_now(sf_voice_t *voice, int index, int note, int velocity
         voice->fm_prev_src = 0.0f;
         voice->osc1_filter = (sf_filter_state_t){0};
         voice->osc2_filter = (sf_filter_state_t){0};
-        /* The delay lines are cleared on every non-legato note so a stolen
+        /* The delay lines start empty on every non-legato note so a stolen
          * voice cannot re-pitch whatever the previous note was still ringing.
-         * Bounded work: 2 x SF_VOICE_DELAY stores, 32 KB, once per note-on. */
-        for (int i = 0; i < SF_VOICE_DELAY; ++i) {
-            voice->delay1[i] = 0.0f;
-            voice->delay2[i] = 0.0f;
-        }
+         * They are only marked here: sf_voice_prepare_delay clears one (16 KB)
+         * when Karplus or the Comb is about to use it, not on every note. */
+        voice->delay_stale1 = 1;
+        voice->delay_stale2 = 1;
         voice->delay_pos1 = 0;
         voice->delay_pos2 = 0;
         voice->delay_low1 = 0.0f;
@@ -403,6 +402,17 @@ static void voice_start_now(sf_voice_t *voice, int index, int note, int velocity
         voice->cycle_value = 0.0f;
         voice->cycle_out = 0.0f;
         voice->cycle_hold_left = 0.0f;
+    }
+}
+
+void sf_voice_prepare_delay(sf_voice_t *voice, int osc1_uses, int osc2_uses) {
+    if (voice->delay_stale1 && osc1_uses) {
+        memset(voice->delay1, 0, sizeof(voice->delay1));
+        voice->delay_stale1 = 0;
+    }
+    if (voice->delay_stale2 && osc2_uses) {
+        memset(voice->delay2, 0, sizeof(voice->delay2));
+        voice->delay_stale2 = 0;
     }
 }
 

@@ -191,6 +191,11 @@ typedef struct {
      * position (see SF_VOICE_DELAY). */
     float delay1[SF_VOICE_DELAY];
     float delay2[SF_VOICE_DELAY];
+    /* Set by a new note: the line still holds the previous note's signal and
+     * is cleared (sf_voice_prepare_delay) only once an engine is about to
+     * use it, so most notes never pay for the 16 KB clear. */
+    int delay_stale1;
+    int delay_stale2;
     unsigned delay_pos1;
     unsigned delay_pos2;
     unsigned karplus_excitation_left1;
@@ -206,6 +211,9 @@ typedef struct {
     /* Plaits NaiveSpeechSynth state, one per oscillator position. */
     sf_speech_state_t speech1;
     sf_speech_state_t speech2;
+    /* Harmo's partial weights, one per oscillator position. */
+    sf_harmo_cache_t harmo1;
+    sf_harmo_cache_t harmo2;
     /* Up to twelve all-pass stages for the Phaser Filter, plus its feedback memory,
      * which is an Osc 2 processor only. */
     float apf[SF_PHASER_MAX_STAGES];
@@ -266,6 +274,10 @@ float sf_env_shape_setup(sf_env_shape_t *shape, int stage, int curve, float ms);
  * along its knob (see voice.c). `stage` is ENV_ATTACK, ENV_DECAY or
  * ENV_RELEASE. */
 float sf_env_time_mod(int stage, float ms, float amount);
+/* Clears a stale delay line (see delay_stale1) that an oscillator position is
+ * about to use. Call before the engines run on every sample: a note or a mode
+ * that needs a line can start at any sample. */
+void sf_voice_prepare_delay(sf_voice_t *voice, int osc1_uses, int osc2_uses);
 float sf_voice_envelope_sample(sf_voice_t *voice, float attack_step,
                                float decay_step, float sustain,
                                const sf_env_shape_t *attack_shape,

@@ -48,6 +48,12 @@
   Reverb as soon as its own region is clear, and Delay, Chorus, Flanger and Super
   Unison after about 64 ms instead of 190 ms. A non-finite sample in the effects
   now restarts that clear instead of wiping 3 MB in one audio block.
+- **Harmo takes about 30% less CPU, and notes start cheaper.** Harmo rebuilt
+  its partial weights on every sample; it now keeps them while Wave, Timbre
+  and the pitch range hold still. A new note no longer clears 32 KB of delay
+  line per voice unless Karplus or the Comb Filter is about to use it, which
+  makes a six-note chord's note-ons about 9x cheaper. The sound is unchanged,
+  bit for bit.
 - **Lighter on the CPU.** A state load is about 7x faster and a preset load 3.5x (one indexed
   pass over the patch instead of a scan per key), and Chorus, Flanger, Phaser,
   Super Unison, Crusher and Reverb do less per-sample maths; the sound is the same

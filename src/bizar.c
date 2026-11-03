@@ -3908,6 +3908,8 @@ static void sf_render_block(void *instance, int16_t *out, int frames) {
     }
     float osc1_tune_ratio = powf(2.0f, inst->osc1_tune / 12.0f);
     float osc2_tune_ratio = powf(2.0f, inst->osc2_tune / 12.0f);
+    const int osc1_delay = sf_engine1_uses_delay(inst->osc1_mode);
+    const int osc2_delay = sf_engine2_uses_delay(inst->osc2_mode);
 
     {
         sf_voice_t *lead = NULL;
@@ -4200,7 +4202,8 @@ static void sf_render_block(void *instance, int16_t *out, int frames) {
                         .apf = voice->apf,
                         .apf_fb = &voice->apf_fb,
                         .sh_hold = &voice->sh_hold,
-                        .sh_count = &voice->sh_count
+                        .sh_count = &voice->sh_count,
+                        .harmo_cache = &voice->harmo1
                     };
                     ctl->osc2 = (sf_engine_voice_t){
                         .rng = &voice->rng,
@@ -4222,7 +4225,8 @@ static void sf_render_block(void *instance, int16_t *out, int frames) {
                         .apf = voice->apf,
                         .apf_fb = &voice->apf_fb,
                         .sh_hold = &voice->sh_hold,
-                        .sh_count = &voice->sh_count
+                        .sh_count = &voice->sh_count,
+                        .harmo_cache = &voice->harmo2
                     };
                     ctl->valid = 1;
                     ctl->age = voice->age;
@@ -4251,6 +4255,7 @@ static void sf_render_block(void *instance, int16_t *out, int frames) {
             ctl->osc2.increment = inc2;
             ctl->osc2.sub_phase = voice->sub_phase2;
             ctl->osc2.gate = gate;
+            sf_voice_prepare_delay(voice, osc1_delay, osc2_delay);
             float raw1 = sf_engine1_sample(&osc1_params, &ctl->osc1, &ctl->osc2);
             float osc2_pre = 0.0f;
             float signal = sf_engine2_mix(&osc2_params, &ctl->osc2, &ctl->osc1,

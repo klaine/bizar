@@ -575,8 +575,8 @@ static const sf_engine_params_t *remap_params(const sf_engine_params_t *in,
  * partial 15 the hardware carries a thin tail of odd partials (about -25 dB at
  * 17, falling 0.35 dB per partial) that also opens up with Timbre; it supplies
  * the upper-band energy of the real engine. Shape is a detuned chorus copy.
- * Output power is constant across the knobs. */
-#define SF_HARMO_PARTIALS 40
+ * Output power is constant across the knobs. SF_HARMO_PARTIALS is in
+ * engines.h, for the weight cache. */
 #define SF_HARMO_PEAK_SPAN 14.5f
 #define SF_HARMO_SKIRT_DB 1.3f
 #define SF_HARMO_FLOOR_LOW_DB (-50.0f)
@@ -654,8 +654,23 @@ static float harmo_sample(const sf_engine_params_t *params,
     int count = (int)((0.49f / voice->increment + 1.0f) * 0.5f);
     if (count > SF_HARMO_PARTIALS) count = SF_HARMO_PARTIALS;
     if (count < 1) count = 1;
-    float weights[SF_HARMO_PARTIALS];
-    harmo_weights(params, weights, count);
+    float local[SF_HARMO_PARTIALS];
+    const float *weights = local;
+    sf_harmo_cache_t *cache = voice->harmo_cache;
+    if (!cache) {
+        harmo_weights(params, local, count);
+    } else {
+        /* The weights depend on Wave, Timbre and the count alone, which hold
+         * still unless a knob is moving or being modulated. */
+        if (cache->count != count || cache->wave != params->wave
+            || cache->timbre != params->timbre) {
+            harmo_weights(params, cache->weights, count);
+            cache->wave = params->wave;
+            cache->timbre = params->timbre;
+            cache->count = count;
+        }
+        weights = cache->weights;
+    }
     float raw = harmo_additive(voice->phase, weights, count);
 
     /* Chorus thickens the sound with a gently detuned copy. */
@@ -2634,6 +2649,14 @@ float sf_engine2_mix(const sf_engine_params_t *params,
         return input + raw2 * oscillator2_level;
     }
 #undef RAW2_OUT
+}
+
+int sf_engine1_uses_delay(int type) {
+    return type == OSC_KARPLUS;
+}
+
+int sf_engine2_uses_delay(int type) {
+    return type == ENGINE_KARPLUS || type == ENGINE_COMB;
 }
 
 void sf_engines_init(void) {

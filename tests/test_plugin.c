@@ -543,9 +543,36 @@ static void test_effect_processing(void) {
     read_value(api, driven, "fx1_subtype", value, sizeof(value));
     assert(strcmp(value, "Digital Sync") == 0);
 
+    /* The Preset knob's options are per type, so a type change has to raise
+     * is_loading or Move keeps planning the knob from the old list: with
+     * fx1_type at Off that is the single option "Off", and the knob does
+     * nothing. The host then writes the chosen option as its index. */
+    for (int i = 0; i < 40; ++i) api->render_block(driven, fx_block, 128);
+    /* One read drains the latch the type changes above left behind. */
+    read_value(api, driven, "is_loading", value, sizeof(value));
+    read_value(api, driven, "is_loading", value, sizeof(value));
+    assert(strcmp(value, "0") == 0);
     api->set_param(driven, "fx1_type", "Reverb");
+    read_value(api, driven, "is_loading", value, sizeof(value));
+    assert(strcmp(value, "1") == 0);
+    {
+        static char contract[65536];
+        read_value(api, driven, "chain_params", contract, sizeof(contract));
+        assert(strstr(contract, "\"key\":\"fx1_subtype\",\"name\":\"FX 1 Preset\",\"type\":\"enum\","
+                                "\"options\":[\"Default\",\"Long\",\"Hall\",\"Echoes\",\"Room\",\"Dark Room\"]") != NULL);
+    }
     read_value(api, driven, "fx1_subtype", value, sizeof(value));
     assert(strcmp(value, "Default") == 0);
+    api->set_param(driven, "fx1_subtype", "2");
+    read_value(api, driven, "fx1_subtype", value, sizeof(value));
+    assert(strcmp(value, "Hall") == 0);
+    /* Writing the same type again is not a change and raises nothing. */
+    for (int i = 0; i < 40; ++i) api->render_block(driven, fx_block, 128);
+    read_value(api, driven, "is_loading", value, sizeof(value));
+    assert(strcmp(value, "0") == 0);
+    api->set_param(driven, "fx1_type", "2");
+    read_value(api, driven, "is_loading", value, sizeof(value));
+    assert(strcmp(value, "0") == 0);
     api->set_param(driven, "fx1_subtype", "Hall");
     read_value(api, driven, "fx1_subtype", value, sizeof(value));
     assert(strcmp(value, "Hall") == 0);

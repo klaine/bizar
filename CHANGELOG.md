@@ -2,6 +2,12 @@
 
 ## Unreleased: Bizar
 
+- **Fixed: the effect Preset knob did nothing on Move after a type change.** The
+  Preset options are per effect type, but changing the type did not tell Move
+  to re-read the parameter list, so the knob kept the previous type's options:
+  with a slot that was Off, the single option "Off". A type change now raises
+  `is_loading` like an oscillator type change does, and Move re-plans the page
+  with the new type's presets.
 - **Sustain pedal.** CC 64 now holds released keys until the pedal comes up, in
   Poly, Mono and Unison, and keeps released keys in the arpeggio or sequence in
   Arp and Seq mode. CC 121 (Reset All Controllers) resets the wheel, this

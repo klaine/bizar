@@ -2183,7 +2183,13 @@ static void set_numeric_param(sf_instance_t *inst, const char *key, float value)
         if (parse_fx_param_key(key, &slot, &field)) {
             if (field == 0) {
                 int next = (int)clamp_enum(value, FX_TYPE_COUNT);
-                if (next != inst->fx_type[slot]) inst->fx_subtype[slot] = 0;
+                if (next != inst->fx_type[slot]) {
+                    /* The slot's Preset options are per type, so the host
+                     * has to re-read chain_params or the knob keeps the old
+                     * list (see is_loading). */
+                    inst->fx_subtype[slot] = 0;
+                    mark_contract_dirty(inst);
+                }
                 inst->fx_type[slot] = next;
             }
             else if (field == 1) inst->fx_mix[slot] = sf_clampf(value, 0.0f, 1.0f);
@@ -2705,7 +2711,10 @@ static void set_param_value(sf_instance_t *inst, const char *key, const char *va
         if (parse_fx_param_key(key, &slot, &field)) {
             if (field == 0) {
                 int next = parse_fx_type(value);
-                if (next != inst->fx_type[slot]) inst->fx_subtype[slot] = 0;
+                if (next != inst->fx_type[slot]) {
+                    inst->fx_subtype[slot] = 0;
+                    mark_contract_dirty(inst);
+                }
                 inst->fx_type[slot] = next;
             }
             else if (field == 7) {
